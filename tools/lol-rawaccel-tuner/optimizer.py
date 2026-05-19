@@ -3,7 +3,7 @@ import random
 
 
 class CemTuner:
-    def __init__(self, bounds, population, elite, generations, seed=0):
+    def __init__(self, bounds, population, elite, generations, seed=0, start=None):
         self.bounds = bounds
         self.population = int(population)
         self.elite = int(elite)
@@ -15,6 +15,18 @@ class CemTuner:
 
         self._mean = {k: (v[0] + v[1]) / 2.0 for k, v in bounds.items()}
         self._std = {k: (v[1] - v[0]) / 2.5 for k, v in bounds.items()}
+
+        if isinstance(start, dict):
+            for k, v in start.items():
+                if k not in self.bounds:
+                    continue
+                lo, hi = self.bounds[k]
+                x = float(v)
+                if x < lo:
+                    x = lo
+                if x > hi:
+                    x = hi
+                self._mean[k] = x
 
         self._candidates = []
         self._scores = []
