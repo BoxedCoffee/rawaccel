@@ -6,9 +6,9 @@ import subprocess
 
 class SynchronousParams:
     def __init__(self, syncSpeed, motivity, gamma, smooth):
-        self.syncSpeed = float(syncSpeed)
+        self.syncSpeed = max(1e-6, float(syncSpeed))
         self.motivity = float(motivity)
-        self.gamma = float(gamma)
+        self.gamma = max(1e-6, float(gamma))
         self.smooth = float(smooth)
 
 
@@ -24,7 +24,7 @@ class RawAccelController:
         dest_path.write_bytes(self.base_settings_path.read_bytes())
         self._base_obj = json.loads(dest_path.read_text(encoding="utf-8"))
 
-    def write_candidate_settings(self, params, dest_path):
+    def write_candidate_settings(self, candidate, dest_path):
         if self._base_obj is None:
             self._base_obj = json.loads(self.base_settings_path.read_text(encoding="utf-8"))
 
@@ -36,15 +36,43 @@ class RawAccelController:
             raise ValueError("profile_index out of range")
 
         profile = profiles[self.profile_index]
-        for axis_key in ("argsX", "argsY"):
-            args = profile.get(axis_key)
+
+        if not isinstance(candidate, dict):
+            raise TypeError("candidate must be a dict")
+
+        mode = candidate.get("mode")
+        output_dpi = candidate.get("outputDpi")
+
+        if output_dpi is not None:
+            profile["Output DPI"] = float(output_dpi)
+
+        axis_sources = (
+            ("argsX", "Whole or horizontal accel parameters"),
+            ("argsY", "Vertical accel parameters"),
+        )
+
+        for internal_key, json_key in axis_sources:
+            args = profile.get(json_key)
             if not isinstance(args, dict):
-                raise ValueError(f"profile missing {axis_key}")
-            args["mode"] = "synchronous"
-            args["syncSpeed"] = float(params.syncSpeed)
-            args["motivity"] = float(params.motivity)
-            args["gamma"] = float(params.gamma)
-            args["smooth"] = float(params.smooth)
+                args = profile.get(internal_key)
+            if not isinstance(args, dict):
+                raise ValueError(f"profile missing {json_key}")
+
+            if mode is not None:
+                args["mode"] = str(mode)
+
+            for k in ("syncSpeed", "motivity", "gamma", "smooth"):
+                if k not in candidate:
+                    continue
+                v = float(candidate[k])
+                if k in ("syncSpeed", "gamma"):
+                    v = max(1e-6, v)
+                args[k] = v
+
+            if json_key in profile and isinstance(profile.get(json_key), dict):
+                profile[json_key] = args
+            else:
+                profile[internal_key] = args
 
         dest_path = pathlib.Path(dest_path)
         dest_path.write_text(json.dumps(obj, indent=2), encoding="utf-8")

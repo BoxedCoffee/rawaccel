@@ -146,6 +146,10 @@ _TeamCity*
 # Local History for Visual Studio Code
 .history/
 
+# Local tuner artifacts
+tools/lol-rawaccel-tuner/config.json
+tools/lol-rawaccel-tuner/runs/
+
 # Visual Studio code coverage results
 *.coverage
 *.coveragexml
