@@ -1574,6 +1574,7 @@ class App(tk.Tk):
 
         return
 
+
     def _limit_step(self, proposed, current, bounds, frac):
         out = {}
         for k, v in proposed.items():
@@ -1891,6 +1892,7 @@ class App(tk.Tk):
         sess["candidate"] = dict(cand2)
         sess["iter"] = int(sess["iter"]) + 1
         self.after(100, self._ai_eval_step)
+
 
 
 if __name__ == "__main__":
