@@ -38,10 +38,14 @@ def run_task_block(root, trials, distances_px, radii_px, seed=None, timeout_ms=N
         "attempts": [],
         "start_pos": None,
         "target_start": None,
+        "first_move_t": None,
+        "first_enter_t": None,
         "prev_sample_pos": None,
         "prev_sample_t": None,
         "path_length": 0.0,
         "overshoots": 0,
+        "perp_area": 0.0,
+        "perp_time": 0.0,
         "max_perp_dev": 0.0,
         "line_unit": (1.0, 0.0),
         "has_line_unit": False,
@@ -113,10 +117,14 @@ def run_task_block(root, trials, distances_px, radii_px, seed=None, timeout_ms=N
 
         state["start_pos"] = start_pos
         state["target_start"] = now
+        state["first_move_t"] = None
+        state["first_enter_t"] = None
         state["prev_sample_pos"] = start_pos
         state["prev_sample_t"] = now
         state["path_length"] = 0.0
         state["overshoots"] = 0
+        state["perp_area"] = 0.0
+        state["perp_time"] = 0.0
         state["max_perp_dev"] = 0.0
         state["last_sign"] = 0
         state["reaccels"] = 0
@@ -156,6 +164,23 @@ def run_task_block(root, trials, distances_px, radii_px, seed=None, timeout_ms=N
         throughput = id_sum / mt_sum if mt_sum > 0 else 0.0
         avg_error = (sum(a["endpoint_error"] for a in attempts) / float(len(attempts))) if attempts else 0.0
 
+        errors = sorted(float(a["endpoint_error"]) for a in attempts) if attempts else []
+
+        def pct(vals, q):
+            if not vals:
+                return 0.0
+            if q <= 0:
+                return float(vals[0])
+            if q >= 1:
+                return float(vals[-1])
+            i = q * (len(vals) - 1)
+            lo = int(math.floor(i))
+            hi = int(math.ceil(i))
+            if lo == hi:
+                return float(vals[lo])
+            t = i - lo
+            return float(vals[lo] * (1.0 - t) + vals[hi] * t)
+
         def path_eff(a):
             d = float(a["distance"])
             pl = float(a["path_length"])
@@ -166,14 +191,32 @@ def run_task_block(root, trials, distances_px, radii_px, seed=None, timeout_ms=N
         avg_path_eff = (sum(path_eff(a) for a in hits) / float(len(hits))) if hits else 0.0
         avg_overshoots = (sum(a["overshoots"] for a in hits) / float(len(hits))) if hits else 0.0
         avg_reaccels = (sum(a["reaccels"] for a in hits) / float(len(hits))) if hits else 0.0
+        avg_time_to_move_ms = (
+            sum(float(a.get("time_to_move", 0.0)) for a in hits) / float(len(hits)) * 1000.0 if hits else 0.0
+        )
+        avg_correction_ms = (
+            sum(float(a.get("correction_time", 0.0)) for a in hits) / float(len(hits)) * 1000.0 if hits else 0.0
+        )
+        avg_bias_x = (sum(float(a.get("bias_x", 0.0)) for a in attempts) / float(len(attempts))) if attempts else 0.0
+        avg_bias_y = (sum(float(a.get("bias_y", 0.0)) for a in attempts) / float(len(attempts))) if attempts else 0.0
+        avg_perp_dev = (
+            sum(float(a.get("avg_perp_dev", 0.0)) for a in hits) / float(len(hits)) if hits else 0.0
+        )
 
         state["result"] = {
             "throughput": float(throughput),
             "miss_rate": float(miss_rate),
             "avg_error_px": float(avg_error),
+            "p50_error_px": float(pct(errors, 0.5)),
+            "p90_error_px": float(pct(errors, 0.9)),
             "avg_path_eff": float(avg_path_eff),
+            "avg_perp_dev": float(avg_perp_dev),
             "avg_overshoots": float(avg_overshoots),
             "avg_reaccels": float(avg_reaccels),
+            "avg_time_to_move_ms": float(avg_time_to_move_ms),
+            "avg_correction_ms": float(avg_correction_ms),
+            "avg_bias_x": float(avg_bias_x),
+            "avg_bias_y": float(avg_bias_y),
         }
 
         canvas.delete("all")
@@ -187,6 +230,7 @@ def run_task_block(root, trials, distances_px, radii_px, seed=None, timeout_ms=N
                 f"\nPath eff: {avg_path_eff:.3f}"
                 f"\nOvershoots: {avg_overshoots:.2f}"
                 f"\nReaccels: {avg_reaccels:.2f}"
+                f"\nErr p50/p90: {pct(errors, 0.5):.1f}/{pct(errors, 0.9):.1f}px"
                 f"\n\nPress ENTER to continue"
             ),
             justify="center",
@@ -210,6 +254,18 @@ def run_task_block(root, trials, distances_px, radii_px, seed=None, timeout_ms=N
         start_pos = state["start_pos"]
         distance_px = math.hypot(tx - start_pos[0], ty - start_pos[1])
         endpoint_error = math.hypot(mx - tx, my - ty)
+        bias_x = mx - tx
+        bias_y = my - ty
+
+        time_to_move = None
+        if state["first_move_t"] is not None:
+            time_to_move = float(state["first_move_t"] - state["t0"])
+
+        correction_time = None
+        if state["first_enter_t"] is not None:
+            correction_time = float(now - state["first_enter_t"])
+
+        avg_perp_dev = float(state["perp_area"] / state["perp_time"]) if state["perp_time"] > 0 else 0.0
 
         state["misses"] += 1
         state["attempts"].append(
@@ -219,9 +275,14 @@ def run_task_block(root, trials, distances_px, radii_px, seed=None, timeout_ms=N
                 "width": float(width_px),
                 "distance": float(distance_px),
                 "endpoint_error": float(endpoint_error),
+                "bias_x": float(bias_x),
+                "bias_y": float(bias_y),
                 "path_length": float(state["path_length"]),
                 "overshoots": int(state["overshoots"]),
                 "reaccels": int(state["reaccels"]),
+                "time_to_move": float(time_to_move) if time_to_move is not None else None,
+                "correction_time": float(correction_time) if correction_time is not None else None,
+                "avg_perp_dev": float(avg_perp_dev),
                 "max_perp_dev": float(state["max_perp_dev"]),
             }
         )
@@ -251,6 +312,9 @@ def run_task_block(root, trials, distances_px, radii_px, seed=None, timeout_ms=N
         dx = pos[0] - prev_pos[0]
         dy = pos[1] - prev_pos[1]
         delta_len = math.hypot(dx, dy)
+
+        if state["first_move_t"] is None and delta_len >= 2.0:
+            state["first_move_t"] = t
         state["path_length"] += delta_len
         state["prev_sample_pos"] = pos
         state["prev_sample_t"] = t
@@ -267,8 +331,14 @@ def run_task_block(root, trials, distances_px, radii_px, seed=None, timeout_ms=N
         perp_x = to_x - ux * parallel
         perp_y = to_y - uy * parallel
         perp_len = math.hypot(perp_x, perp_y)
+        state["perp_area"] += perp_len * dt
+        state["perp_time"] += dt
         if perp_len > state["max_perp_dev"]:
             state["max_perp_dev"] = perp_len
+
+        if state["first_enter_t"] is None:
+            if (pos[0] - tx) ** 2 + (pos[1] - ty) ** 2 <= r ** 2:
+                state["first_enter_t"] = t
 
         signed = (pos[0] - tx) * ux + (pos[1] - ty) * uy
         if abs(signed) > r:
@@ -330,6 +400,18 @@ def run_task_block(root, trials, distances_px, radii_px, seed=None, timeout_ms=N
         start_pos = state["start_pos"]
         distance_px = math.hypot(tx - start_pos[0], ty - start_pos[1])
         endpoint_error = math.hypot(x - tx, y - ty)
+        bias_x = x - tx
+        bias_y = y - ty
+
+        time_to_move = None
+        if state["first_move_t"] is not None:
+            time_to_move = float(state["first_move_t"] - state["t0"])
+
+        correction_time = None
+        if state["first_enter_t"] is not None:
+            correction_time = float(now - state["first_enter_t"])
+
+        avg_perp_dev = float(state["perp_area"] / state["perp_time"]) if state["perp_time"] > 0 else 0.0
 
         if hit:
             state["sum_mt"] += max(1e-3, mt)
@@ -350,9 +432,14 @@ def run_task_block(root, trials, distances_px, radii_px, seed=None, timeout_ms=N
                 "width": float(width_px),
                 "distance": float(distance_px),
                 "endpoint_error": float(endpoint_error),
+                "bias_x": float(bias_x),
+                "bias_y": float(bias_y),
                 "path_length": float(state["path_length"]),
                 "overshoots": int(state["overshoots"]),
                 "reaccels": int(state["reaccels"]),
+                "time_to_move": float(time_to_move) if time_to_move is not None else None,
+                "correction_time": float(correction_time) if correction_time is not None else None,
+                "avg_perp_dev": float(avg_perp_dev),
                 "max_perp_dev": float(state["max_perp_dev"]),
             }
         )

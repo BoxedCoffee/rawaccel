@@ -12,6 +12,9 @@ import statistics
 from optimizer import CemTuner
 from rawaccel import RawAccelController
 from task import run_task_block
+import drills
+import curve_preview
+import report
 
 APP_DIR = pathlib.Path(__file__).resolve().parent
 CONFIG_PATH = APP_DIR / "config.json"
@@ -31,6 +34,7 @@ def _default_config():
             "distances_px": [140, 240, 360],
             "radii_px": [10, 14, 20],
         },
+        "dual_drills": drills.default_dual_config(),
         "sensitivity": {
             "bounds": {
                 "outputDpi": [200.0, 800.0],
@@ -91,6 +95,15 @@ class App(tk.Tk):
         self.timeout_var = tk.IntVar(value=int(self.cfg["task"].get("timeout_ms", 2200)))
         self.start_gate_var = tk.BooleanVar(value=bool(self.cfg["task"].get("start_gate", True)))
 
+        dual_cfg = self.cfg.get("dual_drills")
+        if not isinstance(dual_cfg, dict):
+            dual_cfg = drills.default_dual_config()
+        self.dual_enabled_var = tk.BooleanVar(value=bool(dual_cfg.get("enabled", False)))
+        weights = drills.norm_weights(dual_cfg.get("weights", {}))
+        self.weight_micro_var = tk.DoubleVar(value=float(weights["micro"]))
+        self.weight_flick_var = tk.DoubleVar(value=float(weights["flick"]))
+        self.micro_floor_var = tk.DoubleVar(value=float(dual_cfg.get("micro_floor", 0.95)))
+
         sens_bounds = self.cfg.get("sensitivity", {}).get("bounds", {}).get("outputDpi", [200.0, 800.0])
         self.dpi_min = tk.DoubleVar(value=float(sens_bounds[0]))
         self.dpi_max = tk.DoubleVar(value=float(sens_bounds[1]))
@@ -116,6 +129,9 @@ class App(tk.Tk):
 
         self._session = None
         self._stop_requested = False
+
+        self._curve_canvas = None
+        self._last_best = None
 
         self._build_ui()
         self.after(100, self._first_run_prompt)
@@ -147,6 +163,14 @@ class App(tk.Tk):
         tk.Entry(frm_task, width=10, textvariable=self.timeout_var).grid(row=1, column=1, sticky="w", **pad)
 
         tk.Checkbutton(frm_task, text="Start gate", variable=self.start_gate_var).grid(row=1, column=2, columnspan=2, sticky="w", **pad)
+
+        tk.Checkbutton(frm_task, text="Micro+Flick", variable=self.dual_enabled_var).grid(row=2, column=0, sticky="w", **pad)
+        tk.Label(frm_task, text="w micro").grid(row=2, column=1, sticky="e", **pad)
+        tk.Entry(frm_task, width=8, textvariable=self.weight_micro_var).grid(row=2, column=2, sticky="w", **pad)
+        tk.Label(frm_task, text="w flick").grid(row=2, column=3, sticky="e", **pad)
+        tk.Entry(frm_task, width=8, textvariable=self.weight_flick_var).grid(row=2, column=4, sticky="w", **pad)
+        tk.Label(frm_task, text="micro floor").grid(row=2, column=5, sticky="e", **pad)
+        tk.Entry(frm_task, width=8, textvariable=self.micro_floor_var).grid(row=2, column=6, sticky="w", **pad)
 
         frm_sens = tk.LabelFrame(self, text="Sensitivity bounds (no accel phase)")
         frm_sens.grid(row=2, column=0, sticky="ew", **pad)
@@ -190,15 +214,23 @@ class App(tk.Tk):
 
         tk.Button(frm_actions, text="Start optimization", command=self._start_optimization).grid(row=0, column=0, **pad)
         tk.Button(frm_actions, text="Quick sens (7)", command=self._start_quick_sens).grid(row=0, column=1, **pad)
-        tk.Button(frm_actions, text="Stop", command=self._stop).grid(row=0, column=2, **pad)
-        tk.Button(frm_actions, text="Restore base", command=self._restore_base).grid(row=0, column=3, **pad)
-        tk.Button(frm_actions, text="Open runs", command=self._open_runs).grid(row=0, column=4, **pad)
+        tk.Button(frm_actions, text="A/B duel", command=self._start_duel).grid(row=0, column=2, **pad)
+        tk.Button(frm_actions, text="Apply best", command=self._apply_best).grid(row=0, column=3, **pad)
+        tk.Button(frm_actions, text="Save best", command=self._save_best).grid(row=0, column=4, **pad)
+        tk.Button(frm_actions, text="Stop", command=self._stop).grid(row=0, column=5, **pad)
+        tk.Button(frm_actions, text="Restore base", command=self._restore_base).grid(row=0, column=6, **pad)
+        tk.Button(frm_actions, text="Open runs", command=self._open_runs).grid(row=0, column=7, **pad)
 
         frm_status = tk.LabelFrame(self, text="Status")
         frm_status.grid(row=6, column=0, sticky="ew", **pad)
 
         tk.Label(frm_status, textvariable=self.status_var, width=92, anchor="w").grid(row=0, column=0, **pad)
         tk.Label(frm_status, textvariable=self.best_var, width=92, anchor="w").grid(row=1, column=0, **pad)
+
+        frm_curve = tk.LabelFrame(self, text="Curve preview (synchronous)")
+        frm_curve.grid(row=7, column=0, sticky="ew", **pad)
+        self._curve_canvas = tk.Canvas(frm_curve, width=700, height=220, bg="#0b0f14", highlightthickness=0)
+        self._curve_canvas.grid(row=0, column=0, **pad)
 
     def _bound_row(self, parent, row, name, vmin, vmax):
         pad = {"padx": 8, "pady": 2}
@@ -234,6 +266,16 @@ class App(tk.Tk):
         self.cfg["task"]["timeout_ms"] = int(self.timeout_var.get())
         self.cfg["task"]["start_gate"] = bool(self.start_gate_var.get())
 
+        self.cfg.setdefault("dual_drills", drills.default_dual_config())
+        if not isinstance(self.cfg.get("dual_drills"), dict):
+            self.cfg["dual_drills"] = drills.default_dual_config()
+        self.cfg["dual_drills"]["enabled"] = bool(self.dual_enabled_var.get())
+        self.cfg["dual_drills"].setdefault("weights", {})
+        self.cfg["dual_drills"]["weights"] = drills.norm_weights(
+            {"micro": float(self.weight_micro_var.get()), "flick": float(self.weight_flick_var.get())}
+        )
+        self.cfg["dual_drills"]["micro_floor"] = float(self.micro_floor_var.get())
+
         self.cfg.setdefault("sensitivity", {})
         self.cfg["sensitivity"].setdefault("bounds", {})
         self.cfg["sensitivity"]["bounds"]["outputDpi"] = [float(self.dpi_min.get()), float(self.dpi_max.get())]
@@ -262,15 +304,146 @@ class App(tk.Tk):
         return True
 
     def _score_result(self, result, penalty):
-        overshoot_penalty = 1.0 / (1.0 + result["avg_overshoots"] * 0.25)
-        reaccel_penalty = 1.0 / (1.0 + result["avg_reaccels"] * 0.2)
-        miss_penalty = max(0.0, 1.0 - result["miss_rate"]) ** penalty
+        overshoot_penalty = 1.0 / (1.0 + float(result.get("avg_overshoots", 0.0)) * 0.25)
+        reaccel_penalty = 1.0 / (1.0 + float(result.get("avg_reaccels", 0.0)) * 0.2)
+        miss_penalty = max(0.0, 1.0 - float(result.get("miss_rate", 1.0))) ** float(penalty)
+
+        error_penalty = 1.0 / (1.0 + float(result.get("p90_error_px", result.get("avg_error_px", 0.0))) / 28.0)
+        perp_penalty = 1.0 / (1.0 + float(result.get("avg_perp_dev", 0.0)) / 55.0)
+        correction_penalty = 1.0 / (1.0 + float(result.get("avg_correction_ms", 0.0)) / 650.0)
+        bias_mag = math.hypot(float(result.get("avg_bias_x", 0.0)), float(result.get("avg_bias_y", 0.0)))
+        bias_penalty = 1.0 / (1.0 + bias_mag / 20.0)
+
         return (
-            result["throughput"]
+            float(result.get("throughput", 0.0))
             * miss_penalty
-            * result["avg_path_eff"]
+            * float(result.get("avg_path_eff", 0.0))
+            * perp_penalty
+            * error_penalty
+            * correction_penalty
+            * bias_penalty
             * overshoot_penalty
             * reaccel_penalty
+        )
+
+    def _run_single_drill(self, cfg, seed):
+        result = run_task_block(
+            self,
+            trials=int(cfg["trials"]),
+            distances_px=list(cfg["distances_px"]),
+            radii_px=list(cfg["radii_px"]),
+            seed=int(seed),
+            timeout_ms=int(cfg.get("timeout_ms", 0)),
+            start_gate=bool(cfg.get("start_gate", False)),
+        )
+        return result
+
+    def _eval_drills(self, seed, baseline=None):
+        penalty = float(self.cfg["task"]["penalty"])
+
+        dual_cfg = self.cfg.get("dual_drills")
+        if isinstance(dual_cfg, dict) and bool(dual_cfg.get("enabled")):
+            weights = drills.norm_weights(dual_cfg.get("weights", {}))
+            micro_cfg = dual_cfg.get("micro") if isinstance(dual_cfg.get("micro"), dict) else drills.default_micro()
+            flick_cfg = dual_cfg.get("flick") if isinstance(dual_cfg.get("flick"), dict) else drills.default_flick()
+
+            micro_result = self._run_single_drill(micro_cfg, seed)
+            if micro_result is None:
+                return None
+            micro_score = float(self._score_result(micro_result, penalty))
+
+            flick_result = self._run_single_drill(flick_cfg, seed + 1)
+            if flick_result is None:
+                return None
+            flick_score = float(self._score_result(flick_result, penalty))
+
+            combined = weights["micro"] * micro_score + weights["flick"] * flick_score
+            micro_floor = float(dual_cfg.get("micro_floor", 0.95))
+            if baseline is not None:
+                baseline_micro = float(baseline.get("micro_score", micro_score))
+                if micro_score < baseline_micro * micro_floor:
+                    combined = float("-inf")
+
+            return {
+                "combined_score": float(combined),
+                "micro": micro_result,
+                "flick": flick_result,
+                "micro_score": float(micro_score),
+                "flick_score": float(flick_score),
+            }
+
+        task_cfg = self.cfg["task"]
+        result = self._run_single_drill(task_cfg, seed)
+        if result is None:
+            return None
+        score = float(self._score_result(result, penalty))
+        return {"combined_score": float(score), "single": result}
+
+    def _draw_curve(self, cand):
+        canvas = self._curve_canvas
+        if canvas is None:
+            return
+
+        canvas.delete("all")
+        if not isinstance(cand, dict) or cand.get("mode") != "synchronous":
+            return
+
+        w = int(canvas.cget("width"))
+        h = int(canvas.cget("height"))
+        pad = 18
+
+        sync_speed = float(cand.get("syncSpeed", 5.0))
+        motivity = float(cand.get("motivity", 1.5))
+        gamma = float(cand.get("gamma", 1.0))
+        smooth = float(cand.get("smooth", 0.5))
+
+        pts = curve_preview.curve_points(sync_speed, motivity, gamma, smooth)
+        xs = [math.log10(p[0]) for p in pts]
+        ys = [p[1] for p in pts]
+
+        x_min = min(xs)
+        x_max = max(xs)
+        y_min = min(ys)
+        y_max = max(ys)
+        y_min = min(y_min, 0.5)
+        y_max = max(y_max, 1.5)
+
+        def sx(x):
+            return pad + (x - x_min) / (x_max - x_min) * (w - 2 * pad)
+
+        def sy(y):
+            return h - pad - (y - y_min) / (y_max - y_min) * (h - 2 * pad)
+
+        canvas.create_rectangle(pad, pad, w - pad, h - pad, outline="#1f2937")
+
+        for tick in (-1, 0, 1, 2):
+            x = sx(float(tick))
+            canvas.create_line(x, h - pad, x, h - pad + 4, fill="#475569")
+            canvas.create_text(x, h - pad + 12, text=f"{10**tick:g}", fill="#94a3b8", font=("Segoe UI", 8))
+
+        for y_tick in (0.5, 1.0, 1.5, 2.0):
+            if y_tick < y_min or y_tick > y_max:
+                continue
+            y = sy(y_tick)
+            canvas.create_line(pad - 4, y, pad, y, fill="#475569")
+            canvas.create_text(pad - 8, y, text=f"{y_tick:g}", fill="#94a3b8", font=("Segoe UI", 8), anchor="e")
+
+        coords = []
+        for x, y in zip(xs, ys):
+            coords.extend([sx(x), sy(y)])
+        if len(coords) >= 4:
+            canvas.create_line(*coords, fill="#2dd4bf", width=2)
+
+        x0 = sx(math.log10(max(1e-9, sync_speed)))
+        canvas.create_line(x0, pad, x0, h - pad, fill="#7c3aed")
+
+        canvas.create_text(
+            w - pad,
+            pad,
+            text=f"sync={sync_speed:.2f} mot={motivity:.2f} g={gamma:.2f} s={smooth:.2f}",
+            fill="#cbd5e1",
+            font=("Segoe UI", 9),
+            anchor="ne",
         )
 
     def _read_current_output_dpi(self, settings_path):
@@ -351,7 +524,7 @@ class App(tk.Tk):
 
         log_path = run_dir / "results.csv"
         log_path.write_text(
-            "phase,idx,score,throughput,miss_rate,pathEff,overshoots,reaccels,avgErrorPx,outputDpi\n",
+            "phase,idx,score,tag,throughput,miss_rate,p90_error,pathEff,perpDev,overshoots,reaccels,timeToMoveMs,correctionMs,biasX,biasY,outputDpi\n",
             encoding="utf-8",
         )
 
@@ -456,38 +629,37 @@ class App(tk.Tk):
         if self._session is None or self._session.get("type") != "quick_sens":
             return
 
-        task_cfg = self.cfg["task"]
-        trials = int(task_cfg["trials"])
-        penalty = float(task_cfg["penalty"])
-        timeout_ms = int(task_cfg.get("timeout_ms", 0))
-        start_gate = bool(task_cfg.get("start_gate", False))
-        distances_px = list(task_cfg["distances_px"])
-        radii_px = list(task_cfg["radii_px"])
-
-        result = run_task_block(
-            self,
-            trials=trials,
-            distances_px=distances_px,
-            radii_px=radii_px,
-            seed=int(self.seed_var.get()) + 9001,
-            timeout_ms=timeout_ms,
-            start_gate=start_gate,
-        )
-        if result is None:
+        seed = int(self.seed_var.get()) + 9001
+        eval_res = self._eval_drills(seed)
+        if eval_res is None:
             self._stop_requested = True
             self._finish("Stopped")
             return
 
-        score = float(self._score_result(result, penalty))
+        def row(tag, score, r):
+            return (
+                f"sens,{idx},{float(score):.6f},{tag},{float(r.get('throughput', 0.0)):.6f},{float(r.get('miss_rate', 1.0)):.6f},"
+                f"{float(r.get('p90_error_px', r.get('avg_error_px', 0.0))):.6f},{float(r.get('avg_path_eff', 0.0)):.6f},"
+                f"{float(r.get('avg_perp_dev', 0.0)):.6f},{float(r.get('avg_overshoots', 0.0)):.6f},{float(r.get('avg_reaccels', 0.0)):.6f},"
+                f"{float(r.get('avg_time_to_move_ms', 0.0)):.6f},{float(r.get('avg_correction_ms', 0.0)):.6f},"
+                f"{float(r.get('avg_bias_x', 0.0)):.6f},{float(r.get('avg_bias_y', 0.0)):.6f},{dpi:.3f}\n"
+            )
 
-        line = (
-            f"sens,{idx},{score:.6f},{result['throughput']:.6f},{result['miss_rate']:.6f},"
-            f"{result['avg_path_eff']:.6f},{result['avg_overshoots']:.6f},{result['avg_reaccels']:.6f},{result['avg_error_px']:.6f},"
-            f"{dpi:.3f}\n"
-        )
+        lines = []
+        if "single" in eval_res:
+            r = eval_res["single"]
+            score = eval_res["combined_score"]
+            lines.append(row("single", score, r))
+        else:
+            lines.append(row("micro", eval_res.get("micro_score", 0.0), eval_res["micro"]))
+            lines.append(row("flick", eval_res.get("flick_score", 0.0), eval_res["flick"]))
+            lines.append(row("combined", eval_res["combined_score"], {"throughput": 0.0, "miss_rate": 0.0}))
+
         with open(self._session["log_path"], "a", encoding="utf-8") as f:
-            f.write(line)
+            for ln in lines:
+                f.write(ln)
 
+        score = float(eval_res["combined_score"])
         self._session["results"][round(float(dpi), 3)] = score
 
         if not self._session.get("init_done"):
@@ -529,6 +701,231 @@ class App(tk.Tk):
 
         self._session["eval"] += 1
         self.after(150, self._quick_sens_next)
+
+    def _read_current_curve(self, settings_path):
+        try:
+            obj = json.loads(pathlib.Path(settings_path).read_text(encoding="utf-8"))
+        except Exception:
+            return None
+
+        profiles = obj.get("profiles")
+        if not isinstance(profiles, list) or not profiles:
+            return None
+        idx = int(self.cfg.get("profile_index", 0))
+        if idx < 0 or idx >= len(profiles):
+            idx = 0
+        prof = profiles[idx]
+        if not isinstance(prof, dict):
+            return None
+        args = prof.get("Whole or horizontal accel parameters")
+        if not isinstance(args, dict):
+            return None
+        if args.get("mode") != "synchronous":
+            return None
+        out = {}
+        for k in ("syncSpeed", "motivity", "gamma", "smooth"):
+            if k in args:
+                try:
+                    out[k] = float(args[k])
+                except Exception:
+                    pass
+        return out if out else None
+
+    def _start_duel(self):
+        if self._session is not None:
+            messagebox.showinfo("Running", "A session is already running")
+            return
+        if not self._validate_ready():
+            return
+
+        self._persist_ui_to_config()
+
+        bounds = self.cfg["search"]["bounds"]
+        fixed_dpi = self._read_current_output_dpi(self.settings_var.get().strip())
+        if fixed_dpi is None:
+            messagebox.showerror("Missing", "Could not read 'Output DPI' from settings.json. Run Quick sens or set it in settings.json.")
+            return
+
+        base_curve = self._read_current_curve(self.settings_var.get().strip())
+        if base_curve is None:
+            base_curve = {k: (float(v[0]) + float(v[1])) / 2.0 for k, v in bounds.items()}
+
+        seed = int(self.seed_var.get())
+        rng = random.Random(seed + 123)
+
+        def sample(k):
+            lo, hi = bounds[k]
+            return float(rng.uniform(float(lo), float(hi)))
+
+        candidates = []
+        candidates.append({"syncSpeed": base_curve.get("syncSpeed", 5.0), "motivity": base_curve.get("motivity", 1.5), "gamma": base_curve.get("gamma", 1.0), "smooth": base_curve.get("smooth", 0.5)})
+        for _ in range(7):
+            candidates.append({k: sample(k) for k in ("syncSpeed", "motivity", "gamma", "smooth")})
+
+        RUNS_DIR.mkdir(parents=True, exist_ok=True)
+        run_id = time.strftime("%Y%m%d-%H%M%S")
+        run_dir = RUNS_DIR / f"duel_{run_id}"
+        run_dir.mkdir(parents=True, exist_ok=True)
+
+        controller = RawAccelController(
+            self.writer_var.get().strip(),
+            self.settings_var.get().strip(),
+            profile_index=int(self.cfg.get("profile_index", 0)),
+        )
+        try:
+            controller.snapshot_base(run_dir / "base_settings.json")
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
+            return
+
+        log_path = run_dir / "results.csv"
+        log_path.write_text(
+            "phase,idx,score,tag,throughput,miss_rate,p90_error,pathEff,perpDev,overshoots,reaccels,timeToMoveMs,correctionMs,biasX,biasY,outputDpi,syncSpeed,motivity,gamma,smooth,round,match,side\n",
+            encoding="utf-8",
+        )
+
+        self._stop_requested = False
+        self._session = {
+            "type": "duel",
+            "controller": controller,
+            "run_dir": run_dir,
+            "log_path": log_path,
+            "fixed_dpi": float(fixed_dpi),
+            "baseline": self._eval_drills(seed + 40002),
+            "candidates": candidates,
+            "round": 1,
+            "match": 0,
+            "winners": [],
+            "eval_idx": 0,
+            "seed": seed,
+        }
+
+        self.status_var.set("A/B duel: starting")
+        self.after(100, self._duel_next)
+
+    def _duel_pick(self, a, b, a_score, b_score):
+        msg = (
+            f"Pick winner:\n\n"
+            f"A score={a_score:.4f}  sync={a['syncSpeed']:.2f} mot={a['motivity']:.2f} g={a['gamma']:.2f} s={a['smooth']:.2f}\n"
+            f"B score={b_score:.4f}  sync={b['syncSpeed']:.2f} mot={b['motivity']:.2f} g={b['gamma']:.2f} s={b['smooth']:.2f}\n\n"
+            "Yes=A  No=B  Cancel=Auto"
+        )
+        return messagebox.askyesnocancel("A/B Duel", msg)
+
+    def _duel_next(self):
+        if self._session is None or self._session.get("type") != "duel":
+            return
+        if self._stop_requested:
+            self._finish("Stopped")
+            return
+
+        sess = self._session
+        cand_list = sess["candidates"]
+        if len(cand_list) <= 1:
+            if cand_list:
+                winner = cand_list[0]
+                best_path = sess["run_dir"] / "best_settings.json"
+                try:
+                    cand = {"mode": "synchronous", "outputDpi": float(sess["fixed_dpi"]), **winner}
+                    sess["controller"].write_candidate_settings(cand, best_path)
+                    sess["controller"].apply_settings(best_path)
+                except Exception:
+                    pass
+            self._finish("Done")
+            return
+
+        if len(cand_list) % 2 == 1:
+            sess["winners"].append(cand_list.pop())
+
+        if not cand_list:
+            sess["candidates"] = sess["winners"]
+            sess["winners"] = []
+            sess["round"] += 1
+            sess["match"] = 0
+            self.after(100, self._duel_next)
+            return
+
+        a = cand_list.pop(0)
+        b = cand_list.pop(0)
+        sess["match"] += 1
+        rnd = int(sess["round"])
+        match = int(sess["match"])
+        seed = int(sess["seed"]) + rnd * 1000 + match * 10
+
+        a_cand = {"mode": "synchronous", "outputDpi": float(sess["fixed_dpi"]), **a}
+        b_cand = {"mode": "synchronous", "outputDpi": float(sess["fixed_dpi"]), **b}
+
+        self._draw_curve(a_cand)
+        self.status_var.set(f"A/B duel r{rnd} m{match}: A")
+        a_path = sess["run_dir"] / f"r{rnd}_m{match}_A.json"
+        sess["controller"].write_candidate_settings(a_cand, a_path)
+        if not sess["controller"].apply_settings(a_path):
+            a_eval = {"combined_score": float("-inf"), "single": {}}
+        else:
+            a_eval = self._eval_drills(seed, baseline=sess.get("baseline"))
+            if a_eval is None:
+                self._stop_requested = True
+                self._finish("Stopped")
+                return
+
+        self._draw_curve(b_cand)
+        self.status_var.set(f"A/B duel r{rnd} m{match}: B")
+        b_path = sess["run_dir"] / f"r{rnd}_m{match}_B.json"
+        sess["controller"].write_candidate_settings(b_cand, b_path)
+        if not sess["controller"].apply_settings(b_path):
+            b_eval = {"combined_score": float("-inf"), "single": {}}
+        else:
+            b_eval = self._eval_drills(seed, baseline=sess.get("baseline"))
+            if b_eval is None:
+                self._stop_requested = True
+                self._finish("Stopped")
+                return
+
+        a_score = float(a_eval.get("combined_score", float("-inf")))
+        b_score = float(b_eval.get("combined_score", float("-inf")))
+
+        def log_eval(side, score, eval_res, cand):
+            sess["eval_idx"] += 1
+            idx0 = int(sess["eval_idx"])
+            phase = "duel"
+
+            def row(tag, score, r):
+                return (
+                    f"{phase},{idx0},{float(score):.6f},{tag},{float(r.get('throughput', 0.0)):.6f},{float(r.get('miss_rate', 1.0)):.6f},"
+                    f"{float(r.get('p90_error_px', r.get('avg_error_px', 0.0))):.6f},{float(r.get('avg_path_eff', 0.0)):.6f},"
+                    f"{float(r.get('avg_perp_dev', 0.0)):.6f},{float(r.get('avg_overshoots', 0.0)):.6f},{float(r.get('avg_reaccels', 0.0)):.6f},"
+                    f"{float(r.get('avg_time_to_move_ms', 0.0)):.6f},{float(r.get('avg_correction_ms', 0.0)):.6f},"
+                    f"{float(r.get('avg_bias_x', 0.0)):.6f},{float(r.get('avg_bias_y', 0.0)):.6f},{float(sess.get('fixed_dpi', 0.0)):.3f},"
+                    f"{float(cand.get('syncSpeed', 0.0)):.6f},{float(cand.get('motivity', 0.0)):.6f},{float(cand.get('gamma', 0.0)):.6f},{float(cand.get('smooth', 0.0)):.6f},"
+                    f"{rnd},{match},{side}\n"
+                )
+
+            lines = []
+            if eval_res is None:
+                return
+            if "single" in eval_res:
+                lines.append(row("single", score, eval_res["single"]))
+            else:
+                lines.append(row("micro", eval_res.get("micro_score", 0.0), eval_res["micro"]))
+                lines.append(row("flick", eval_res.get("flick_score", 0.0), eval_res["flick"]))
+                lines.append(row("combined", score, {"throughput": 0.0, "miss_rate": 0.0}))
+            with open(sess["log_path"], "a", encoding="utf-8") as f:
+                for ln in lines:
+                    f.write(ln)
+
+        log_eval("A", a_score, a_eval, a)
+        log_eval("B", b_score, b_eval, b)
+
+        choice = self._duel_pick(a, b, a_score, b_score)
+        if choice is True:
+            winner = a
+        elif choice is False:
+            winner = b
+        else:
+            winner = a if a_score >= b_score else b
+
+        sess["winners"].append(winner)
+        self.after(100, self._duel_next)
 
     def _start_optimization(self):
         if self._session is not None:
@@ -594,7 +991,7 @@ class App(tk.Tk):
 
         log_path = run_dir / "results.csv"
         log_path.write_text(
-            "phase,idx,generation,member,score,throughput,miss_rate,pathEff,overshoots,reaccels,avgErrorPx,outputDpi,syncSpeed,motivity,gamma,smooth\n",
+            "phase,idx,generation,member,score,tag,throughput,miss_rate,p90_error,pathEff,perpDev,overshoots,reaccels,timeToMoveMs,correctionMs,biasX,biasY,outputDpi,syncSpeed,motivity,gamma,smooth\n",
             encoding="utf-8",
         )
 
@@ -604,22 +1001,41 @@ class App(tk.Tk):
             "curve_tuner": curve_tuner,
             "repeats": repeats,
             "task_seeds": task_seeds,
+            "base_seed": base_seed,
+            "baseline_checked_at": None,
             "repeat_idx": 0,
-            "repeat_scores": [],
+            "repeat_runs": [],
             "candidate": None,
             "best_curve": None,
             "fixed_dpi": float(fixed_dpi),
+            "baseline": None,
             "run_dir": run_dir,
             "log_path": log_path,
             "idx": 0,
             "best": None,
             "best_score": -1e9,
+            "last_best_idx": 0,
         }
 
         self.status_var.set(f"Run {run_id}: applying base settings")
         ok = controller.apply_settings(controller.base_settings_path)
         if not ok:
             messagebox.showwarning("Writer", "writer.exe reported an error applying base settings")
+
+        self.status_var.set(f"Run {run_id}: warmup (not logged)")
+        warmup = self._eval_drills(base_seed + 40001)
+        if warmup is None:
+            self._stop_requested = True
+            self._finish("Stopped")
+            return
+
+        self.status_var.set(f"Run {run_id}: baseline")
+        baseline = self._eval_drills(base_seed + 40002)
+        if baseline is None:
+            self._stop_requested = True
+            self._finish("Stopped")
+            return
+        self._session["baseline"] = baseline
 
         self.after(100, self._next_eval)
 
@@ -631,19 +1047,123 @@ class App(tk.Tk):
         if not self._validate_ready():
             return
         self._persist_ui_to_config()
-        controller = RawAccelController(self.writer_var.get().strip(), self.settings_var.get().strip())
+        controller = RawAccelController(
+            self.writer_var.get().strip(),
+            self.settings_var.get().strip(),
+            profile_index=int(self.cfg.get("profile_index", 0)),
+        )
         ok = controller.apply_settings(controller.base_settings_path)
         if not ok:
             messagebox.showwarning("Writer", "writer.exe reported an error")
         else:
             self.status_var.set("Base settings applied")
 
+    def _apply_best(self):
+        if self._session is not None:
+            messagebox.showinfo("Running", "Session is running")
+            return
+        if not self._validate_ready():
+            return
+        if self._last_best is None:
+            messagebox.showerror("Missing", "No best candidate yet")
+            return
+
+        self._persist_ui_to_config()
+        controller = RawAccelController(
+            self.writer_var.get().strip(),
+            self.settings_var.get().strip(),
+            profile_index=int(self.cfg.get("profile_index", 0)),
+        )
+        cand = dict(self._last_best)
+        if "outputDpi" not in cand:
+            dpi = self._read_current_output_dpi(self.settings_var.get().strip())
+            if dpi is not None:
+                cand["outputDpi"] = float(dpi)
+        if "mode" not in cand:
+            cand["mode"] = "synchronous" if "syncSpeed" in cand else "noaccel"
+
+        RUNS_DIR.mkdir(parents=True, exist_ok=True)
+        out_path = RUNS_DIR / "best_applied.json"
+        try:
+            controller.write_candidate_settings(cand, out_path)
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
+            return
+
+        ok = controller.apply_settings(out_path)
+        if not ok:
+            messagebox.showwarning("Writer", "writer.exe reported an error")
+            return
+        self.status_var.set("Best applied")
+        self._draw_curve(cand)
+
+    def _save_best(self):
+        if self._session is not None:
+            messagebox.showinfo("Running", "Session is running")
+            return
+        if not self._validate_ready():
+            return
+        if self._last_best is None:
+            messagebox.showerror("Missing", "No best candidate yet")
+            return
+
+        dest = filedialog.asksaveasfilename(
+            title="Save best settings.json",
+            defaultextension=".json",
+            filetypes=[("JSON", "*.json"), ("All files", "*")],
+        )
+        if not dest:
+            return
+
+        controller = RawAccelController(
+            self.writer_var.get().strip(),
+            self.settings_var.get().strip(),
+            profile_index=int(self.cfg.get("profile_index", 0)),
+        )
+
+        cand = dict(self._last_best)
+        if "outputDpi" not in cand:
+            dpi = self._read_current_output_dpi(self.settings_var.get().strip())
+            if dpi is not None:
+                cand["outputDpi"] = float(dpi)
+        if "mode" not in cand:
+            cand["mode"] = "synchronous" if "syncSpeed" in cand else "noaccel"
+
+        try:
+            controller.write_candidate_settings(cand, dest)
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
+            return
+
+        messagebox.showinfo("Saved", str(dest))
+
     def _open_runs(self):
         RUNS_DIR.mkdir(parents=True, exist_ok=True)
         subprocess.Popen(["explorer", str(RUNS_DIR)])
 
     def _finish(self, msg):
-        self.status_var.set(msg)
+        sess = self._session
+        if isinstance(sess, dict):
+            if isinstance(sess.get("best"), dict):
+                self._last_best = dict(sess["best"])
+            elif sess.get("type") == "quick_sens" and sess.get("best") is not None:
+                self._last_best = {"mode": "noaccel", "outputDpi": float(sess["best"])}
+            log_path = sess.get("log_path")
+            run_dir = sess.get("run_dir")
+            if log_path:
+                try:
+                    title = f"LoL RawAccel Tuner - {sess.get('type', sess.get('phase', 'run'))}"
+                    out = report.write_report(log_path, title=title)
+                    if run_dir:
+                        self.status_var.set(f"{msg} (report: {out.name})")
+                    else:
+                        self.status_var.set(msg)
+                except Exception:
+                    self.status_var.set(msg)
+            else:
+                self.status_var.set(msg)
+        else:
+            self.status_var.set(msg)
         self._session = None
 
     def _next_eval(self):
@@ -659,6 +1179,31 @@ class App(tk.Tk):
         run_dir = self._session["run_dir"]
         idx = self._session["idx"]
 
+        baseline = self._session.get("baseline")
+        if (
+            isinstance(baseline, dict)
+            and idx > 0
+            and idx % 10 == 0
+            and self._session.get("baseline_checked_at") != idx
+        ):
+            self._session["baseline_checked_at"] = idx
+            self.status_var.set("Drift check: baseline")
+            base_seed = int(self._session.get("base_seed", 0))
+            cur = self._eval_drills(base_seed + 60000 + idx)
+            if cur is None:
+                self._stop_requested = True
+                self._finish("Stopped")
+                return
+            base0 = float(baseline.get("combined_score", 0.0))
+            cur0 = float(cur.get("combined_score", 0.0))
+            ratio = (cur0 / base0) if base0 != 0 else 1.0
+            if ratio < 0.85:
+                cont = messagebox.askyesno("Drift", f"Baseline dropped to {ratio*100:.0f}% of start. Continue?")
+                if not cont:
+                    self._stop_requested = True
+                    self._finish("Stopped")
+                    return
+
         candidate = tuner.next_candidate()
         if candidate is None:
             self._finish("Done")
@@ -666,7 +1211,7 @@ class App(tk.Tk):
 
         self._session["candidate"] = candidate
         self._session["repeat_idx"] = 0
-        self._session["repeat_scores"] = []
+        self._session["repeat_runs"] = []
 
         fixed_dpi = float(self._session["fixed_dpi"])
         cand = {
@@ -682,6 +1227,8 @@ class App(tk.Tk):
             f"gamma={cand['gamma']:.3f} smooth={cand['smooth']:.3f}"
         )
 
+        self._draw_curve(cand)
+
         cand_path = run_dir / f"candidate_{idx:03d}.json"
         try:
             controller.write_candidate_settings(cand, cand_path)
@@ -705,51 +1252,28 @@ class App(tk.Tk):
         if self._session is None:
             return
 
-        task_cfg = self.cfg["task"]
-        trials = int(task_cfg["trials"])
-        penalty = float(task_cfg["penalty"])
-        timeout_ms = int(task_cfg.get("timeout_ms", 0))
-        start_gate = bool(task_cfg.get("start_gate", False))
-        distances_px = list(task_cfg["distances_px"])
-        radii_px = list(task_cfg["radii_px"])
-
         repeat_idx = int(self._session["repeat_idx"])
         seeds = list(self._session["task_seeds"])
         seed = int(seeds[min(repeat_idx, len(seeds) - 1)])
 
-        result = run_task_block(
-            self,
-            trials=trials,
-            distances_px=distances_px,
-            radii_px=radii_px,
-            seed=seed,
-            timeout_ms=timeout_ms,
-            start_gate=start_gate,
-        )
-        if result is None:
+        eval_res = self._eval_drills(seed, baseline=self._session.get("baseline"))
+        if eval_res is None:
             self._stop_requested = True
             self._finish("Stopped")
             return
 
-        overshoot_penalty = 1.0 / (1.0 + result["avg_overshoots"] * 0.25)
-        reaccel_penalty = 1.0 / (1.0 + result["avg_reaccels"] * 0.2)
-        miss_penalty = max(0.0, 1.0 - result["miss_rate"]) ** penalty
-        score = (
-            result["throughput"]
-            * miss_penalty
-            * result["avg_path_eff"]
-            * overshoot_penalty
-            * reaccel_penalty
-        )
-
-        self._session["repeat_scores"].append(float(score))
+        score = float(eval_res["combined_score"])
+        self._session["repeat_runs"].append((score, eval_res))
         self._session["repeat_idx"] += 1
 
         if int(self._session["repeat_idx"]) < int(self._session["repeats"]):
             self.after(250, lambda: self._run_block(idx, cand))
             return
 
-        score_med = float(statistics.median(self._session["repeat_scores"]))
+        runs_sorted = sorted(self._session["repeat_runs"], key=lambda x: x[0])
+        mid_run = runs_sorted[len(runs_sorted) // 2]
+        score_med = float(mid_run[0])
+        mid_eval = mid_run[1]
 
         phase = self._session["phase"]
         tuner = self._session["curve_tuner"]
@@ -759,20 +1283,34 @@ class App(tk.Tk):
         gen = tuner.generation
         member = tuner.member
 
-        line = (
-            f"{phase},{idx},{gen},{member},{score_med:.6f},{result['throughput']:.6f},{result['miss_rate']:.6f},"
-            f"{result['avg_path_eff']:.6f},{result['avg_overshoots']:.6f},{result['avg_reaccels']:.6f},{result['avg_error_px']:.6f},"
-            f"{float(cand.get('outputDpi', 0.0)):.3f},{float(cand.get('syncSpeed', 0.0)):.6f},{float(cand.get('motivity', 0.0)):.6f},"
-            f"{float(cand.get('gamma', 0.0)):.6f},{float(cand.get('smooth', 0.0)):.6f}\n"
-        )
+        def row(tag, score, r):
+            return (
+                f"{phase},{idx},{gen},{member},{float(score):.6f},{tag},{float(r.get('throughput', 0.0)):.6f},{float(r.get('miss_rate', 1.0)):.6f},"
+                f"{float(r.get('p90_error_px', r.get('avg_error_px', 0.0))):.6f},{float(r.get('avg_path_eff', 0.0)):.6f},"
+                f"{float(r.get('avg_perp_dev', 0.0)):.6f},{float(r.get('avg_overshoots', 0.0)):.6f},{float(r.get('avg_reaccels', 0.0)):.6f},"
+                f"{float(r.get('avg_time_to_move_ms', 0.0)):.6f},{float(r.get('avg_correction_ms', 0.0)):.6f},"
+                f"{float(r.get('avg_bias_x', 0.0)):.6f},{float(r.get('avg_bias_y', 0.0)):.6f},{float(cand.get('outputDpi', 0.0)):.3f},"
+                f"{float(cand.get('syncSpeed', 0.0)):.6f},{float(cand.get('motivity', 0.0)):.6f},{float(cand.get('gamma', 0.0)):.6f},{float(cand.get('smooth', 0.0)):.6f}\n"
+            )
+
+        lines = []
+        if "single" in mid_eval:
+            lines.append(row("single", score_med, mid_eval["single"]))
+        else:
+            lines.append(row("micro", mid_eval.get("micro_score", 0.0), mid_eval["micro"]))
+            lines.append(row("flick", mid_eval.get("flick_score", 0.0), mid_eval["flick"]))
+            lines.append(row("combined", score_med, {"throughput": 0.0, "miss_rate": 0.0}))
         with open(self._session["log_path"], "a", encoding="utf-8") as f:
-            f.write(line)
+            for ln in lines:
+                f.write(ln)
 
         if math.isfinite(score_med) and score_med > self._session["best_score"]:
             self._session["best_score"] = score_med
             self._session["best"] = dict(cand)
+            self._session["last_best_idx"] = int(idx)
 
             self._session["best_curve"] = dict(cand)
+            self._draw_curve(cand)
             self.best_var.set(
                 (
                     f"Best curve {score_med:.3f}: DPI={cand['outputDpi']:.1f} syncSpeed={cand['syncSpeed']:.3f} "
@@ -781,156 +1319,16 @@ class App(tk.Tk):
             )
 
         self._session["idx"] += 1
+        next_idx = int(self._session["idx"])
+        last_best_idx = int(self._session.get("last_best_idx", 0))
+        population = int(self.population_var.get())
+        if next_idx - last_best_idx >= max(8, population * 2) and next_idx >= max(12, population * 3):
+            self._finish("Done")
+            return
+
         self.after(200, self._next_eval)
 
-
-        self._session["candidate"] = candidate
-        self._session["repeat_idx"] = 0
-        self._session["repeat_scores"] = []
-
-        best_sens = self._session.get("best_sens")
-        best_curve = self._session.get("best_curve")
-
-        if phase == "sens":
-            cand = {"mode": "noaccel", "outputDpi": float(candidate["outputDpi"])}
-            label = f"Sens {idx+1}: Output DPI={cand['outputDpi']:.1f} (noaccel)"
-        elif phase == "curve":
-            cand = {
-                "mode": "synchronous",
-                "outputDpi": float(best_sens["outputDpi"]),
-                "syncSpeed": float(candidate["syncSpeed"]),
-                "motivity": float(candidate["motivity"]),
-                "gamma": float(candidate["gamma"]),
-                "smooth": float(candidate["smooth"]),
-            }
-            label = (
-                f"Curve {idx+1}: syncSpeed={cand['syncSpeed']:.3f} motivity={cand['motivity']:.3f} "
-                f"gamma={cand['gamma']:.3f} smooth={cand['smooth']:.3f}"
-            )
-        else:
-            cand = {
-                "mode": "synchronous",
-                "outputDpi": float(candidate["outputDpi"]),
-                "syncSpeed": float(candidate["syncSpeed"]),
-                "motivity": float(candidate["motivity"]),
-                "gamma": float(candidate["gamma"]),
-                "smooth": float(candidate["smooth"]),
-            }
-            label = (
-                f"Fine {idx+1}: DPI={cand['outputDpi']:.1f} syncSpeed={cand['syncSpeed']:.3f} mot={cand['motivity']:.3f} "
-                f"g={cand['gamma']:.3f} s={cand['smooth']:.3f}"
-            )
-
-        cand_path = run_dir / f"candidate_{idx:03d}.json"
-        try:
-            controller.write_candidate_settings(cand, cand_path)
-        except Exception as e:
-            messagebox.showerror("Error", str(e))
-            self._finish("Error writing candidate")
-            return
-
-        self.status_var.set(label)
-
-        ok = controller.apply_settings(cand_path)
-        if not ok:
-            tuner.report_result(float("-inf"))
-            self._session["idx"] += 1
-            self.after(100, self._next_eval)
-            return
-
-        self.after(1300, lambda: self._run_block(idx, cand))
-
-    def _run_block(self, idx, cand):
-        if self._session is None:
-            return
-
-        task_cfg = self.cfg["task"]
-        trials = int(task_cfg["trials"])
-        penalty = float(task_cfg["penalty"])
-        timeout_ms = int(task_cfg.get("timeout_ms", 0))
-        start_gate = bool(task_cfg.get("start_gate", False))
-        distances_px = list(task_cfg["distances_px"])
-        radii_px = list(task_cfg["radii_px"])
-
-        repeat_idx = int(self._session["repeat_idx"])
-        seeds = list(self._session["task_seeds"])
-        seed = int(seeds[min(repeat_idx, len(seeds) - 1)])
-
-        result = run_task_block(
-            self,
-            trials=trials,
-            distances_px=distances_px,
-            radii_px=radii_px,
-            seed=seed,
-            timeout_ms=timeout_ms,
-            start_gate=start_gate,
-        )
-        if result is None:
-            self._stop_requested = True
-            self._finish("Stopped")
-            return
-
-        overshoot_penalty = 1.0 / (1.0 + result["avg_overshoots"] * 0.25)
-        reaccel_penalty = 1.0 / (1.0 + result["avg_reaccels"] * 0.2)
-        miss_penalty = max(0.0, 1.0 - result["miss_rate"]) ** penalty
-        score = (
-            result["throughput"]
-            * miss_penalty
-            * result["avg_path_eff"]
-            * overshoot_penalty
-            * reaccel_penalty
-        )
-
-        self._session["repeat_scores"].append(float(score))
-        self._session["repeat_idx"] += 1
-
-        if int(self._session["repeat_idx"]) < int(self._session["repeats"]):
-            self.after(250, lambda: self._run_block(idx, cand))
-            return
-
-        score_med = float(statistics.median(self._session["repeat_scores"]))
-
-        phase = self._session["phase"]
-        if phase == "sens":
-            tuner = self._session["sens_tuner"]
-        elif phase == "curve":
-            tuner = self._session["curve_tuner"]
-        else:
-            tuner = self._session["fine_tuner"]
-
-        tuner.report_result(score_med)
-
-        gen = tuner.generation
-        member = tuner.member
-
-        line = (
-            f"{phase},{idx},{gen},{member},{score_med:.6f},{result['throughput']:.6f},{result['miss_rate']:.6f},"
-            f"{result['avg_path_eff']:.6f},{result['avg_overshoots']:.6f},{result['avg_reaccels']:.6f},{result['avg_error_px']:.6f},"
-            f"{float(cand.get('outputDpi', 0.0)):.3f},{float(cand.get('syncSpeed', 0.0)):.6f},{float(cand.get('motivity', 0.0)):.6f},"
-            f"{float(cand.get('gamma', 0.0)):.6f},{float(cand.get('smooth', 0.0)):.6f}\n"
-        )
-        with open(self._session["log_path"], "a", encoding="utf-8") as f:
-            f.write(line)
-
-        if math.isfinite(score_med) and score_med > self._session["best_score"]:
-            self._session["best_score"] = score_med
-            self._session["best"] = dict(cand)
-
-            if phase == "sens":
-                self._session["best_sens"] = {"outputDpi": float(cand["outputDpi"])}
-                self.best_var.set(f"Best sens {score_med:.3f}: Output DPI={cand['outputDpi']:.1f}")
-            else:
-                if phase == "curve":
-                    self._session["best_curve"] = dict(cand)
-                self.best_var.set(
-                    (
-                        f"Best {phase} {score_med:.3f}: DPI={cand['outputDpi']:.1f} syncSpeed={cand['syncSpeed']:.3f} "
-                        f"mot={cand['motivity']:.3f} gamma={cand['gamma']:.3f} smooth={cand['smooth']:.3f}"
-                    )
-                )
-
-        self._session["idx"] += 1
-        self.after(200, self._next_eval)
+        return
 
 
 if __name__ == "__main__":
