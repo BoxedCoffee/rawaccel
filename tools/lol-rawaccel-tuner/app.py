@@ -54,6 +54,13 @@ def _default_config():
                 "smooth": [0.2, 0.8],
             },
         },
+        "ai": {
+            "enabled": True,
+            "max_iters": 18,
+            "confidence_threshold": 0.85,
+            "history_limit": 12,
+            "temperature": 0.2,
+        },
     }
 
 
@@ -126,6 +133,7 @@ class App(tk.Tk):
 
         self.status_var = tk.StringVar(value="Idle")
         self.best_var = tk.StringVar(value="")
+        self.progress_var = tk.StringVar(value="")
 
         self._session = None
         self._stop_requested = False
@@ -215,17 +223,20 @@ class App(tk.Tk):
         tk.Button(frm_actions, text="Start optimization", command=self._start_optimization).grid(row=0, column=0, **pad)
         tk.Button(frm_actions, text="Quick sens (7)", command=self._start_quick_sens).grid(row=0, column=1, **pad)
         tk.Button(frm_actions, text="A/B duel", command=self._start_duel).grid(row=0, column=2, **pad)
-        tk.Button(frm_actions, text="Apply best", command=self._apply_best).grid(row=0, column=3, **pad)
-        tk.Button(frm_actions, text="Save best", command=self._save_best).grid(row=0, column=4, **pad)
-        tk.Button(frm_actions, text="Stop", command=self._stop).grid(row=0, column=5, **pad)
-        tk.Button(frm_actions, text="Restore base", command=self._restore_base).grid(row=0, column=6, **pad)
-        tk.Button(frm_actions, text="Open runs", command=self._open_runs).grid(row=0, column=7, **pad)
+        tk.Button(frm_actions, text="Guided tune", command=self._start_guided).grid(row=0, column=3, **pad)
+        tk.Button(frm_actions, text="AI tune", command=self._start_ai_tune).grid(row=0, column=4, **pad)
+        tk.Button(frm_actions, text="Apply best", command=self._apply_best).grid(row=0, column=5, **pad)
+        tk.Button(frm_actions, text="Save best", command=self._save_best).grid(row=0, column=6, **pad)
+        tk.Button(frm_actions, text="Stop", command=self._stop).grid(row=0, column=7, **pad)
+        tk.Button(frm_actions, text="Restore base", command=self._restore_base).grid(row=0, column=8, **pad)
+        tk.Button(frm_actions, text="Open runs", command=self._open_runs).grid(row=0, column=9, **pad)
 
         frm_status = tk.LabelFrame(self, text="Status")
         frm_status.grid(row=6, column=0, sticky="ew", **pad)
 
         tk.Label(frm_status, textvariable=self.status_var, width=92, anchor="w").grid(row=0, column=0, **pad)
-        tk.Label(frm_status, textvariable=self.best_var, width=92, anchor="w").grid(row=1, column=0, **pad)
+        tk.Label(frm_status, textvariable=self.progress_var, width=92, anchor="w").grid(row=1, column=0, **pad)
+        tk.Label(frm_status, textvariable=self.best_var, width=92, anchor="w").grid(row=2, column=0, **pad)
 
         frm_curve = tk.LabelFrame(self, text="Curve preview (synchronous)")
         frm_curve.grid(row=7, column=0, sticky="ew", **pad)
@@ -326,7 +337,7 @@ class App(tk.Tk):
             * reaccel_penalty
         )
 
-    def _run_single_drill(self, cfg, seed):
+    def _run_single_drill(self, cfg, seed, progress_hook=None):
         result = run_task_block(
             self,
             trials=int(cfg["trials"]),
@@ -336,9 +347,14 @@ class App(tk.Tk):
             timeout_ms=int(cfg.get("timeout_ms", 0)),
             start_gate=bool(cfg.get("start_gate", False)),
         )
+        if result is not None and progress_hook is not None:
+            try:
+                progress_hook()
+            except Exception:
+                pass
         return result
 
-    def _eval_drills(self, seed, baseline=None):
+    def _eval_drills(self, seed, baseline=None, progress_hook=None):
         penalty = float(self.cfg["task"]["penalty"])
 
         dual_cfg = self.cfg.get("dual_drills")
@@ -347,12 +363,12 @@ class App(tk.Tk):
             micro_cfg = dual_cfg.get("micro") if isinstance(dual_cfg.get("micro"), dict) else drills.default_micro()
             flick_cfg = dual_cfg.get("flick") if isinstance(dual_cfg.get("flick"), dict) else drills.default_flick()
 
-            micro_result = self._run_single_drill(micro_cfg, seed)
+            micro_result = self._run_single_drill(micro_cfg, seed, progress_hook=progress_hook)
             if micro_result is None:
                 return None
             micro_score = float(self._score_result(micro_result, penalty))
 
-            flick_result = self._run_single_drill(flick_cfg, seed + 1)
+            flick_result = self._run_single_drill(flick_cfg, seed + 1, progress_hook=progress_hook)
             if flick_result is None:
                 return None
             flick_score = float(self._score_result(flick_result, penalty))
@@ -373,7 +389,7 @@ class App(tk.Tk):
             }
 
         task_cfg = self.cfg["task"]
-        result = self._run_single_drill(task_cfg, seed)
+        result = self._run_single_drill(task_cfg, seed, progress_hook=progress_hook)
         if result is None:
             return None
         score = float(self._score_result(result, penalty))
@@ -1164,7 +1180,235 @@ class App(tk.Tk):
                 self.status_var.set(msg)
         else:
             self.status_var.set(msg)
+        self.progress_var.set("")
         self._session = None
+
+    def _progress_hook(self):
+        sess = self._session
+        if not isinstance(sess, dict):
+            return
+        if "current_run" not in sess or "total_runs" not in sess:
+            return
+        sess["current_run"] = int(sess.get("current_run", 0)) + 1
+        self.progress_var.set(f"{sess['current_run']}/{sess['total_runs']}")
+
+    def _start_guided(self):
+        if self._session is not None:
+            messagebox.showinfo("Running", "A session is already running")
+            return
+        if not self._validate_ready():
+            return
+
+        self._persist_ui_to_config()
+
+        fixed_dpi = self._read_current_output_dpi(self.settings_var.get().strip())
+        if fixed_dpi is None:
+            messagebox.showerror("Missing", "Could not read 'Output DPI' from settings.json. Run Quick sens first or set it.")
+            return
+
+        dual_cfg = self.cfg.get("dual_drills")
+        dual_enabled = isinstance(dual_cfg, dict) and bool(dual_cfg.get("enabled"))
+        runs_per_eval = 2 if dual_enabled else 1
+
+        sens_evals = 7
+        curve_candidates = 8
+        curve_matches = curve_candidates - 1
+        curve_evals = curve_matches * 2
+        confirm_evals = 2
+        total_evals = sens_evals + curve_evals + confirm_evals
+        total_runs = total_evals * runs_per_eval
+
+        RUNS_DIR.mkdir(parents=True, exist_ok=True)
+        run_id = time.strftime("%Y%m%d-%H%M%S")
+        run_dir = RUNS_DIR / f"guided_{run_id}"
+        run_dir.mkdir(parents=True, exist_ok=True)
+
+        controller = RawAccelController(
+            self.writer_var.get().strip(),
+            self.settings_var.get().strip(),
+            profile_index=int(self.cfg.get("profile_index", 0)),
+        )
+        controller.snapshot_base(run_dir / "base_settings.json")
+
+        log_path = run_dir / "results.csv"
+        log_path.write_text(
+            "phase,idx,score,tag,outputDpi,syncSpeed,motivity,gamma,smooth\n",
+            encoding="utf-8",
+        )
+
+        self._stop_requested = False
+        self._session = {
+            "type": "guided",
+            "controller": controller,
+            "run_dir": run_dir,
+            "log_path": log_path,
+            "fixed_dpi": float(fixed_dpi),
+            "sens_best": None,
+            "curve_best": None,
+            "baseline": None,
+            "seed": int(self.seed_var.get()),
+            "current_run": 0,
+            "total_runs": int(total_runs),
+        }
+        self.progress_var.set(f"0/{total_runs}")
+        self.status_var.set("Guided: sens")
+        self.after(50, self._guided_sens)
+
+    def _guided_sens(self):
+        if self._session is None or self._session.get("type") != "guided":
+            return
+        if self._stop_requested:
+            self._finish("Stopped")
+            return
+
+        sess = self._session
+        seed = int(sess["seed"]) + 9100
+        best = None
+        best_score = float("-inf")
+
+        sens_bounds = self.cfg.get("sensitivity", {}).get("bounds", {}).get("outputDpi", [200.0, 800.0])
+        lo, hi = float(sens_bounds[0]), float(sens_bounds[1])
+        base = float(sess["fixed_dpi"])
+        points = [lo, base, hi]
+        points = [float(p) for p in points]
+
+        for i in range(7):
+            if self._stop_requested:
+                self._finish("Stopped")
+                return
+            t = i / 6.0
+            dpi = lo * (1.0 - t) + hi * t
+            if i in (0, 3, 6):
+                dpi = points[(0 if i == 0 else 1 if i == 3 else 2)]
+            cand = {"mode": "noaccel", "outputDpi": float(dpi)}
+            path = sess["run_dir"] / f"sens_{i+1:02d}.json"
+            sess["controller"].write_candidate_settings(cand, path)
+            if not sess["controller"].apply_settings(path):
+                continue
+
+            eval_res = self._eval_drills(seed + i, progress_hook=self._progress_hook)
+            if eval_res is None:
+                self._finish("Stopped")
+                return
+            score = float(eval_res["combined_score"])
+            with open(sess["log_path"], "a", encoding="utf-8") as f:
+                f.write(f"sens,{i+1},{score:.6f},combined,{dpi:.3f},0,0,0,0\n")
+            if score > best_score:
+                best_score = score
+                best = float(dpi)
+                self.best_var.set(f"Guided sens best {best_score:.3f}: Output DPI={best:.1f}")
+
+        if best is None:
+            self._finish("Done")
+            return
+
+        sess["sens_best"] = best
+        sess["fixed_dpi"] = float(best)
+        self.status_var.set("Guided: curve")
+        self.after(50, self._guided_curve)
+
+    def _guided_curve(self):
+        if self._session is None or self._session.get("type") != "guided":
+            return
+        if self._stop_requested:
+            self._finish("Stopped")
+            return
+
+        sess = self._session
+        bounds = self.cfg["search"]["bounds"]
+        rng = random.Random(int(sess["seed"]) + 123)
+
+        def sample(k):
+            lo, hi = bounds[k]
+            return float(rng.uniform(float(lo), float(hi)))
+
+        candidates = []
+        center = {k: (float(v[0]) + float(v[1])) / 2.0 for k, v in bounds.items()}
+        candidates.append(center)
+        for _ in range(7):
+            candidates.append({k: sample(k) for k in ("syncSpeed", "motivity", "gamma", "smooth")})
+
+        seed_base = int(sess["seed"]) + 9200
+        while len(candidates) > 1:
+            if len(candidates) % 2 == 1:
+                candidates.append(candidates[-1])
+            winners = []
+            for m in range(0, len(candidates), 2):
+                a = candidates[m]
+                b = candidates[m + 1]
+
+                def run_one(tag, params, s):
+                    cand = {"mode": "synchronous", "outputDpi": float(sess["fixed_dpi"]), **params}
+                    self._draw_curve(cand)
+                    path = sess["run_dir"] / f"curve_r{len(winners)+1:02d}_{tag}.json"
+                    sess["controller"].write_candidate_settings(cand, path)
+                    if not sess["controller"].apply_settings(path):
+                        return float("-inf")
+                    ev = self._eval_drills(s, baseline=sess.get("baseline"), progress_hook=self._progress_hook)
+                    if ev is None:
+                        return None
+                    score = float(ev["combined_score"])
+                    with open(sess["log_path"], "a", encoding="utf-8") as f:
+                        f.write(
+                            f"curve,{sess.get('curve_idx',0)+1},{score:.6f},combined,{sess['fixed_dpi']:.3f},"
+                            f"{params['syncSpeed']:.6f},{params['motivity']:.6f},{params['gamma']:.6f},{params['smooth']:.6f}\n"
+                        )
+                    sess["curve_idx"] = int(sess.get("curve_idx", 0)) + 1
+                    return score
+
+                sa = run_one("A", a, seed_base + m)
+                if sa is None:
+                    self._finish("Stopped")
+                    return
+                sb = run_one("B", b, seed_base + m + 1)
+                if sb is None:
+                    self._finish("Stopped")
+                    return
+                winners.append(a if sa >= sb else b)
+
+            candidates = winners
+
+        sess["curve_best"] = candidates[0]
+        self.best_var.set(
+            f"Guided curve best: syncSpeed={candidates[0]['syncSpeed']:.3f} mot={candidates[0]['motivity']:.3f} gamma={candidates[0]['gamma']:.3f} smooth={candidates[0]['smooth']:.3f}"
+        )
+        self.status_var.set("Guided: confirm")
+        self.after(50, self._guided_confirm)
+
+    def _guided_confirm(self):
+        if self._session is None or self._session.get("type") != "guided":
+            return
+        if self._stop_requested:
+            self._finish("Stopped")
+            return
+
+        sess = self._session
+        best = sess.get("curve_best")
+        if not isinstance(best, dict):
+            self._finish("Done")
+            return
+
+        cand = {"mode": "synchronous", "outputDpi": float(sess["fixed_dpi"]), **best}
+        path = sess["run_dir"] / "best_settings.json"
+        sess["controller"].write_candidate_settings(cand, path)
+        sess["controller"].apply_settings(path)
+
+        seed = int(sess["seed"]) + 9300
+        a = self._eval_drills(seed, progress_hook=self._progress_hook)
+        if a is None:
+            self._finish("Stopped")
+            return
+        b = self._eval_drills(seed + 1, progress_hook=self._progress_hook)
+        if b is None:
+            self._finish("Stopped")
+            return
+
+        with open(sess["log_path"], "a", encoding="utf-8") as f:
+            f.write(f"confirm,1,{float(a['combined_score']):.6f},combined,{sess['fixed_dpi']:.3f},{best['syncSpeed']:.6f},{best['motivity']:.6f},{best['gamma']:.6f},{best['smooth']:.6f}\n")
+            f.write(f"confirm,2,{float(b['combined_score']):.6f},combined,{sess['fixed_dpi']:.3f},{best['syncSpeed']:.6f},{best['motivity']:.6f},{best['gamma']:.6f},{best['smooth']:.6f}\n")
+
+        self._last_best = dict(cand)
+        self._finish("Done")
 
     def _next_eval(self):
         if self._session is None:
@@ -1329,6 +1573,326 @@ class App(tk.Tk):
         self.after(200, self._next_eval)
 
         return
+
+
+    def _limit_step(self, proposed, current, bounds, frac):
+        out = {}
+        for k, v in proposed.items():
+            if k not in bounds:
+                continue
+            lo, hi = bounds[k]
+            span = float(hi) - float(lo)
+            max_delta = span * float(frac)
+            cur = float(current.get(k, (float(lo) + float(hi)) / 2.0))
+            x = float(v)
+            if max_delta > 0:
+                if x > cur + max_delta:
+                    x = cur + max_delta
+                if x < cur - max_delta:
+                    x = cur - max_delta
+            out[k] = x
+        return ai_tuner.clamp_candidate(out, bounds)
+
+    def _start_ai_tune(self):
+        if self._session is not None:
+            messagebox.showinfo("Running", "A session is already running")
+            return
+        if not self._validate_ready():
+            return
+
+        self._persist_ui_to_config()
+
+        fixed_dpi = self._read_current_output_dpi(self.settings_var.get().strip())
+        if fixed_dpi is None:
+            messagebox.showerror("Missing", "Could not read 'Output DPI' from settings.json. Run Quick sens first or set it.")
+            return
+
+        azure_cfg = ai_tuner.default_azure_config()
+        if not azure_cfg["endpoint"] or not azure_cfg["api_key"] or not azure_cfg["deployment"]:
+            messagebox.showerror(
+                "Missing",
+                "Set AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_API_KEY, AZURE_OPENAI_DEPLOYMENT (and optionally AZURE_OPENAI_API_VERSION)",
+            )
+            return
+
+        bounds = self.cfg["search"]["bounds"]
+        start_curve = self._read_current_curve(self.settings_var.get().strip())
+        if start_curve is None:
+            start_curve = {k: (float(v[0]) + float(v[1])) / 2.0 for k, v in bounds.items()}
+
+        max_iters = int(self.cfg.get("ai", {}).get("max_iters", 18))
+        conf_th = float(self.cfg.get("ai", {}).get("confidence_threshold", 0.85))
+        hist_lim = int(self.cfg.get("ai", {}).get("history_limit", 12))
+        temp = float(self.cfg.get("ai", {}).get("temperature", 0.2))
+
+        dual_cfg = self.cfg.get("dual_drills")
+        dual_enabled = isinstance(dual_cfg, dict) and bool(dual_cfg.get("enabled"))
+        runs_per_eval = 2 if dual_enabled else 1
+        total_runs = int(max_iters * runs_per_eval)
+
+        RUNS_DIR.mkdir(parents=True, exist_ok=True)
+        run_id = time.strftime("%Y%m%d-%H%M%S")
+        run_dir = RUNS_DIR / f"ai_{run_id}"
+        run_dir.mkdir(parents=True, exist_ok=True)
+
+        controller = RawAccelController(
+            self.writer_var.get().strip(),
+            self.settings_var.get().strip(),
+            profile_index=int(self.cfg.get("profile_index", 0)),
+        )
+        try:
+            controller.snapshot_base(run_dir / "base_settings.json")
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
+            return
+
+        log_path = run_dir / "results.csv"
+        log_path.write_text(
+            "phase,iter,score,confidence,reason,tag,throughput,miss_rate,p90_error,pathEff,perpDev,overshoots,reaccels,timeToMoveMs,correctionMs,biasX,biasY,outputDpi,syncSpeed,motivity,gamma,smooth\n",
+            encoding="utf-8",
+        )
+
+        trace_path = run_dir / "ai_trace.jsonl"
+        trace_path.write_text("", encoding="utf-8")
+
+        client = ai_tuner.AzureOpenAIClient(
+            endpoint=azure_cfg["endpoint"],
+            api_key=azure_cfg["api_key"],
+            deployment=azure_cfg["deployment"],
+            api_version=azure_cfg["api_version"],
+        )
+
+        self._stop_requested = False
+        self._session = {
+            "type": "ai",
+            "controller": controller,
+            "run_dir": run_dir,
+            "log_path": log_path,
+            "trace_path": trace_path,
+            "client": client,
+            "bounds": bounds,
+            "fixed_dpi": float(fixed_dpi),
+            "candidate": ai_tuner.clamp_candidate(start_curve, bounds),
+            "history": [],
+            "best": None,
+            "best_score": float("-inf"),
+            "iter": 0,
+            "max_iters": max_iters,
+            "confidence_threshold": conf_th,
+            "history_limit": hist_lim,
+            "temperature": temp,
+            "no_improve": 0,
+            "step_frac": 0.25,
+            "ai_thread": None,
+            "ai_result": None,
+            "ai_error": None,
+            "current_run": 0,
+            "total_runs": total_runs,
+        }
+
+        self.progress_var.set(f"0/{total_runs}")
+        self.status_var.set("AI tune: starting")
+        self.best_var.set("")
+
+        self.after(50, self._ai_eval_step)
+
+    def _ai_eval_step(self):
+        sess = self._session
+        if not isinstance(sess, dict) or sess.get("type") != "ai":
+            return
+        if self._stop_requested:
+            self._finish("Stopped")
+            return
+
+        it = int(sess["iter"])
+        if it >= int(sess["max_iters"]):
+            self._last_best = dict(sess["best"]) if isinstance(sess.get("best"), dict) else None
+            self._finish("Done")
+            return
+
+        cand = dict(sess["candidate"])
+        full = {"mode": "synchronous", "outputDpi": float(sess["fixed_dpi"]), **cand}
+        self._draw_curve(full)
+
+        cand_path = pathlib.Path(sess["run_dir"]) / f"candidate_{it:03d}.json"
+        sess["controller"].write_candidate_settings(full, cand_path)
+        ok = sess["controller"].apply_settings(cand_path)
+        if not ok:
+            sess["iter"] += 1
+            self.after(50, self._ai_eval_step)
+            return
+
+        self.status_var.set(f"AI tune {it+1}/{sess['max_iters']}: play")
+
+        eval_res = self._eval_drills(
+            int(self.seed_var.get()) + 50000 + it,
+            baseline=sess.get("baseline"),
+            progress_hook=self._progress_hook,
+        )
+        if eval_res is None:
+            self._stop_requested = True
+            self._finish("Stopped")
+            return
+
+        score = float(eval_res.get("combined_score", float("-inf")))
+        reason = ""
+        conf = 0.0
+
+        record = {
+            "iter": it,
+            "candidate": cand,
+            "score": score,
+            "eval": eval_res,
+        }
+        sess["history"].append(record)
+        if len(sess["history"]) > int(sess["history_limit"]):
+            sess["history"] = sess["history"][len(sess["history"]) - int(sess["history_limit"]) :]
+
+        improved = score > float(sess.get("best_score", float("-inf")))
+        if improved:
+            sess["best_score"] = score
+            sess["best"] = dict(full)
+            sess["no_improve"] = 0
+            self.best_var.set(
+                f"Best {score:.3f}: DPI={full['outputDpi']:.1f} sync={full['syncSpeed']:.3f} mot={full['motivity']:.3f} g={full['gamma']:.3f} s={full['smooth']:.3f}"
+            )
+        else:
+            sess["no_improve"] = int(sess.get("no_improve", 0)) + 1
+
+        def log_one(tag, r, s, conf, reason):
+            with open(sess["log_path"], "a", encoding="utf-8") as f:
+                f.write(
+                    f"ai,{it},{float(s):.6f},{float(conf):.3f},{json.dumps(str(reason)[:200])},{tag},"
+                    f"{float(r.get('throughput', 0.0)):.6f},{float(r.get('miss_rate', 1.0)):.6f},{float(r.get('p90_error_px', r.get('avg_error_px', 0.0))):.6f},"
+                    f"{float(r.get('avg_path_eff', 0.0)):.6f},{float(r.get('avg_perp_dev', 0.0)):.6f},{float(r.get('avg_overshoots', 0.0)):.6f},{float(r.get('avg_reaccels', 0.0)):.6f},"
+                    f"{float(r.get('avg_time_to_move_ms', 0.0)):.6f},{float(r.get('avg_correction_ms', 0.0)):.6f},"
+                    f"{float(r.get('avg_bias_x', 0.0)):.6f},{float(r.get('avg_bias_y', 0.0)):.6f},"
+                    f"{float(full['outputDpi']):.3f},{float(full['syncSpeed']):.6f},{float(full['motivity']):.6f},{float(full['gamma']):.6f},{float(full['smooth']):.6f}\n"
+                )
+
+        if "single" in eval_res:
+            log_one("single", eval_res["single"], score, conf, reason)
+        else:
+            log_one("micro", eval_res["micro"], float(eval_res.get("micro_score", 0.0)), conf, reason)
+            log_one("flick", eval_res["flick"], float(eval_res.get("flick_score", 0.0)), conf, reason)
+            log_one("combined", {"throughput": 0.0, "miss_rate": 0.0}, score, conf, reason)
+
+        sess["ai_result"] = None
+        sess["ai_error"] = None
+
+        def worker():
+            try:
+                bounds = sess["bounds"]
+                state = {
+                    "mode": "synchronous",
+                    "bounds": bounds,
+                    "fixed": {"outputDpi": float(sess["fixed_dpi"])},
+                    "history": [
+                        {
+                            "iter": int(h["iter"]),
+                            "candidate": h["candidate"],
+                            "score": float(h["score"]),
+                            "summary": _ai_eval_summary(h["eval"]),
+                        }
+                        for h in sess["history"]
+                    ],
+                    "best": {
+                        "score": float(sess.get("best_score", float("-inf"))),
+                        "candidate": dict(sess.get("best", {})),
+                    },
+                    "objective": {
+                        "goal": "maximize combined_score",
+                        "notes": "Prefer stable improvements. Keep motivity>1, gamma>0, syncSpeed>0, smooth in [0,1].",
+                    },
+                    "limits": {
+                        "iter": it,
+                        "max_iters": int(sess["max_iters"]),
+                        "no_improve": int(sess.get("no_improve", 0)),
+                    },
+                }
+
+                msgs = ai_tuner.build_ai_messages(state)
+                content = sess["client"].chat(msgs, temperature=float(sess["temperature"]))
+                parsed = ai_tuner.parse_ai_response(content)
+                cand2 = ai_tuner.clamp_candidate(parsed["candidate"], bounds)
+                cand2 = self._limit_step(cand2, cand, bounds, float(sess.get("step_frac", 0.25)))
+                parsed["candidate"] = cand2
+                sess["ai_result"] = parsed
+
+                with open(sess["trace_path"], "a", encoding="utf-8") as f:
+                    f.write(json.dumps({"iter": it, "request": state, "response": parsed}, ensure_ascii=False) + "\n")
+            except Exception as e:
+                sess["ai_error"] = str(e)
+
+        def _ai_eval_summary(ev):
+            if not isinstance(ev, dict):
+                return {}
+            if "single" in ev:
+                return {"score": float(ev.get("combined_score", 0.0)), "single": ev["single"]}
+            return {
+                "score": float(ev.get("combined_score", 0.0)),
+                "micro_score": float(ev.get("micro_score", 0.0)),
+                "flick_score": float(ev.get("flick_score", 0.0)),
+                "micro": ev.get("micro"),
+                "flick": ev.get("flick"),
+            }
+
+        thread = threading.Thread(target=worker, daemon=True)
+        sess["ai_thread"] = thread
+        thread.start()
+
+        self.status_var.set(f"AI tune {it+1}/{sess['max_iters']}: thinking")
+        self.after(200, self._ai_poll)
+
+    def _ai_poll(self):
+        sess = self._session
+        if not isinstance(sess, dict) or sess.get("type") != "ai":
+            return
+        if self._stop_requested:
+            self._finish("Stopped")
+            return
+
+        th = sess.get("ai_thread")
+        if isinstance(th, threading.Thread) and th.is_alive():
+            self.after(200, self._ai_poll)
+            return
+
+        err = sess.get("ai_error")
+        if err:
+            messagebox.showerror("AI error", str(err))
+            self._finish("Error")
+            return
+
+        res = sess.get("ai_result")
+        if not isinstance(res, dict):
+            self._finish("Error")
+            return
+
+        stop = bool(res.get("stop"))
+        conf = float(res.get("confidence", 0.0))
+        reason = str(res.get("reason", ""))
+        cand2 = res.get("candidate")
+        if not isinstance(cand2, dict):
+            self._finish("Error")
+            return
+
+        with open(sess["log_path"], "a", encoding="utf-8") as f:
+            f.write(f"ai,{int(sess['iter'])},0.000000,{conf:.3f},{json.dumps(reason[:200])},ai_note,0,0,0,0,0,0,0,0,0,0,0,{float(sess['fixed_dpi']):.3f},{cand2['syncSpeed']:.6f},{cand2['motivity']:.6f},{cand2['gamma']:.6f},{cand2['smooth']:.6f}\n")
+
+        if stop and conf >= float(sess["confidence_threshold"]) and int(sess["iter"]) >= 3:
+            self._last_best = dict(sess["best"]) if isinstance(sess.get("best"), dict) else None
+            self._finish("Done")
+            return
+
+        if int(sess.get("no_improve", 0)) >= 6 and int(sess["iter"]) >= 6:
+            self._last_best = dict(sess["best"]) if isinstance(sess.get("best"), dict) else None
+            self._finish("Done")
+            return
+
+        sess["candidate"] = dict(cand2)
+        sess["iter"] = int(sess["iter"]) + 1
+        self.after(100, self._ai_eval_step)
+
 
 
 if __name__ == "__main__":
