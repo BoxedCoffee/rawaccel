@@ -149,6 +149,7 @@ _TeamCity*
 # Local tuner artifacts
 tools/lol-rawaccel-tuner/config.json
 tools/lol-rawaccel-tuner/runs/
+tools/lol-rawaccel-tuner/.env
 
 # Visual Studio code coverage results
 *.coverage
