@@ -45,6 +45,45 @@ class AzureOpenAIClient:
         return content
 
 
+class OpenAICompatibleClient:
+    def __init__(self, api_base, api_key, model):
+        self.api_base = api_base.rstrip("/")
+        self.api_key = api_key
+        self.model = model
+
+    def chat(self, messages, temperature=0.2, max_tokens=600):
+        url = f"{self.api_base}/chat/completions"
+        body = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": float(temperature),
+            "max_tokens": int(max_tokens),
+        }
+
+        data = json.dumps(body).encode("utf-8")
+        req = urllib.request.Request(url, data=data, method="POST")
+        req.add_header("Content-Type", "application/json")
+        if self.api_key:
+            req.add_header("Authorization", f"Bearer {self.api_key}")
+
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+
+        choices = payload.get("choices")
+        if not isinstance(choices, list) or not choices:
+            raise RuntimeError("no choices")
+
+        msg = choices[0].get("message")
+        if not isinstance(msg, dict):
+            raise RuntimeError("missing message")
+
+        content = msg.get("content")
+        if not isinstance(content, str):
+            raise RuntimeError("missing content")
+
+        return content
+
+
 def _env(name):
     v = os.environ.get(name)
     if v is None:
@@ -59,6 +98,14 @@ def default_azure_config():
         "api_key": _env("AZURE_OPENAI_API_KEY") or "",
         "deployment": _env("AZURE_OPENAI_DEPLOYMENT") or "",
         "api_version": _env("AZURE_OPENAI_API_VERSION") or "2024-02-15-preview",
+    }
+
+
+def default_openai_compat_config():
+    return {
+        "api_base": _env("OPENAI_API_BASE") or "",
+        "api_key": _env("OPENAI_API_KEY") or "",
+        "model": _env("OPENAI_MODEL") or "",
     }
 
 

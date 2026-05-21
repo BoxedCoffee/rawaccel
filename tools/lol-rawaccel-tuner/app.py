@@ -1607,11 +1607,26 @@ class App(tk.Tk):
             messagebox.showerror("Missing", "Could not read 'Output DPI' from settings.json. Run Quick sens first or set it.")
             return
 
+        openai_cfg = ai_tuner.default_openai_compat_config()
         azure_cfg = ai_tuner.default_azure_config()
-        if not azure_cfg["endpoint"] or not azure_cfg["api_key"] or not azure_cfg["deployment"]:
+        if openai_cfg["api_base"] and openai_cfg["model"]:
+            client = ai_tuner.OpenAICompatibleClient(
+                api_base=openai_cfg["api_base"],
+                api_key=openai_cfg["api_key"],
+                model=openai_cfg["model"],
+            )
+        elif azure_cfg["endpoint"] and azure_cfg["api_key"] and azure_cfg["deployment"]:
+            client = ai_tuner.AzureOpenAIClient(
+                endpoint=azure_cfg["endpoint"],
+                api_key=azure_cfg["api_key"],
+                deployment=azure_cfg["deployment"],
+                api_version=azure_cfg["api_version"],
+            )
+        else:
             messagebox.showerror(
                 "Missing",
-                "Set AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_API_KEY, AZURE_OPENAI_DEPLOYMENT (and optionally AZURE_OPENAI_API_VERSION)",
+                "Set OPENAI_API_BASE + OPENAI_MODEL (+ optional OPENAI_API_KEY)\n"
+                "or AZURE_OPENAI_ENDPOINT + AZURE_OPENAI_API_KEY + AZURE_OPENAI_DEPLOYMENT.",
             )
             return
 
@@ -1654,13 +1669,6 @@ class App(tk.Tk):
 
         trace_path = run_dir / "ai_trace.jsonl"
         trace_path.write_text("", encoding="utf-8")
-
-        client = ai_tuner.AzureOpenAIClient(
-            endpoint=azure_cfg["endpoint"],
-            api_key=azure_cfg["api_key"],
-            deployment=azure_cfg["deployment"],
-            api_version=azure_cfg["api_version"],
-        )
 
         self._stop_requested = False
         self._session = {
