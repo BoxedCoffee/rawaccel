@@ -14,8 +14,14 @@ def run_task_block(root, trials, distances_px, radii_px, seed=None, timeout_ms=N
     height = int(win.winfo_screenheight())
     win.geometry(f"{width}x{height}+0+0")
     win.attributes("-fullscreen", True)
+    win.attributes("-topmost", True)
     win.grab_set()
     win.focus_force()
+
+    try:
+        win.protocol("WM_DELETE_WINDOW", lambda: None)
+    except Exception:
+        pass
 
     canvas = tk.Canvas(win, bg="#0b0f14", highlightthickness=0)
     canvas.pack(fill="both", expand=True)
@@ -490,6 +496,17 @@ def run_task_block(root, trials, distances_px, radii_px, seed=None, timeout_ms=N
     win.bind("<Button-1>", on_click)
     win.bind("<Key>", on_key)
     win.bind("<Configure>", on_configure)
+
+    def on_focus_out(event):
+        if not win.winfo_exists() or state.get("done"):
+            return
+        try:
+            win.focus_force()
+            win.grab_set()
+        except Exception:
+            pass
+
+    win.bind("<FocusOut>", on_focus_out)
 
     def sample_loop():
         if not win.winfo_exists():
