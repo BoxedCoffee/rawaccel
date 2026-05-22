@@ -136,6 +136,7 @@ def build_ai_messages(state):
             "motivity": "number",
             "gamma": "number",
             "smooth": "number",
+            "yToXRatio": "number",
         },
         "reason": "short string",
     }
@@ -184,6 +185,9 @@ def parse_ai_response(text):
         },
     }
 
+    if "yToXRatio" in cand and cand.get("yToXRatio") is not None:
+        out["candidate"]["yToXRatio"] = float(cand.get("yToXRatio"))
+
     return out
 
 
@@ -204,5 +208,8 @@ def clamp_candidate(candidate, bounds):
     out["gamma"] = max(1e-6, float(out.get("gamma", 1.0)))
     out["motivity"] = max(1.000001, float(out.get("motivity", 1.5)))
     out["smooth"] = min(1.0, max(0.0, float(out.get("smooth", 0.5))))
+
+    if "yToXRatio" in bounds or "yToXRatio" in out:
+        out["yToXRatio"] = max(1e-6, float(out.get("yToXRatio", 1.0)))
 
     return out

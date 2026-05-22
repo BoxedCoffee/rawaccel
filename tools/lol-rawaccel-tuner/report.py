@@ -62,6 +62,8 @@ def write_report(csv_path, out_path=None, title="Run report"):
         if tag in ("single", "combined"):
             score = _safe_float(r.get("score"), None)
             idx = _safe_float(r.get("idx"), None)
+            if idx is None:
+                idx = _safe_float(r.get("iter"), None)
             if score is None or idx is None or not math.isfinite(score):
                 continue
             combined.append((int(idx), float(score), r))
@@ -87,6 +89,7 @@ def write_report(csv_path, out_path=None, title="Run report"):
             + td(r.get("motivity"))
             + td(r.get("gamma"))
             + td(r.get("smooth"))
+            + td(r.get("yToXRatio"))
             + "</tr>"
         )
 
@@ -95,7 +98,7 @@ def write_report(csv_path, out_path=None, title="Run report"):
         summary = (
             f"<p><b>Best</b> score={html.escape(best.get('score',''))} "
             f"DPI={html.escape(best.get('outputDpi',''))} syncSpeed={html.escape(best.get('syncSpeed',''))} "
-            f"motivity={html.escape(best.get('motivity',''))} gamma={html.escape(best.get('gamma',''))} smooth={html.escape(best.get('smooth',''))}</p>"
+            f"motivity={html.escape(best.get('motivity',''))} gamma={html.escape(best.get('gamma',''))} smooth={html.escape(best.get('smooth',''))} yToXRatio={html.escape(best.get('yToXRatio',''))}</p>"
         )
 
     body = f"""
@@ -121,7 +124,7 @@ th, td {{ border-bottom: 1px solid #1f2937; padding: 8px 10px; text-align: left;
 <div class='card'>
 <h2>Top candidates</h2>
 <table>
-<thead><tr><th>idx</th><th>score</th><th>outputDpi</th><th>syncSpeed</th><th>motivity</th><th>gamma</th><th>smooth</th></tr></thead>
+<thead><tr><th>idx</th><th>score</th><th>outputDpi</th><th>syncSpeed</th><th>motivity</th><th>gamma</th><th>smooth</th><th>yToXRatio</th></tr></thead>
 <tbody>
 {''.join(table_rows)}
 </tbody>

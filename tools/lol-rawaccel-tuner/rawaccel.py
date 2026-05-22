@@ -42,9 +42,13 @@ class RawAccelController:
 
         mode = candidate.get("mode")
         output_dpi = candidate.get("outputDpi")
+        y_to_x_ratio = candidate.get("yToXRatio")
 
         if output_dpi is not None:
             profile["Output DPI"] = float(output_dpi)
+
+        if y_to_x_ratio is not None:
+            profile["Y/X output DPI ratio (vertical sens multiplier)"] = float(y_to_x_ratio)
 
         axis_sources = (
             ("argsX", "Whole or horizontal accel parameters"),

@@ -116,6 +116,7 @@ def run_task_block(root, trials, distances_px, radii_px, seed=None, timeout_ms=N
             state["has_line_unit"] = False
 
         state["start_pos"] = start_pos
+        state["target_vec"] = (float(x - start_pos[0]), float(y - start_pos[1]))
         state["target_start"] = now
         state["first_move_t"] = None
         state["first_enter_t"] = None
@@ -165,6 +166,11 @@ def run_task_block(root, trials, distances_px, radii_px, seed=None, timeout_ms=N
         avg_error = (sum(a["endpoint_error"] for a in attempts) / float(len(attempts))) if attempts else 0.0
 
         errors = sorted(float(a["endpoint_error"]) for a in attempts) if attempts else []
+
+        horiz = [a for a in attempts if a.get("axis") == "h"]
+        vert = [a for a in attempts if a.get("axis") == "v"]
+        horiz_errors = sorted(float(a["endpoint_error"]) for a in horiz) if horiz else []
+        vert_errors = sorted(float(a["endpoint_error"]) for a in vert) if vert else []
 
         def pct(vals, q):
             if not vals:
@@ -217,6 +223,10 @@ def run_task_block(root, trials, distances_px, radii_px, seed=None, timeout_ms=N
             "avg_correction_ms": float(avg_correction_ms),
             "avg_bias_x": float(avg_bias_x),
             "avg_bias_y": float(avg_bias_y),
+            "h_miss_rate": float(1.0 - (sum(1 for a in horiz if a["hit"]) / float(len(horiz)))) if horiz else float(miss_rate),
+            "v_miss_rate": float(1.0 - (sum(1 for a in vert if a["hit"]) / float(len(vert)))) if vert else float(miss_rate),
+            "h_p90_error_px": float(pct(horiz_errors, 0.9)),
+            "v_p90_error_px": float(pct(vert_errors, 0.9)),
         }
 
         canvas.delete("all")
@@ -284,6 +294,7 @@ def run_task_block(root, trials, distances_px, radii_px, seed=None, timeout_ms=N
                 "correction_time": float(correction_time) if correction_time is not None else None,
                 "avg_perp_dev": float(avg_perp_dev),
                 "max_perp_dev": float(state["max_perp_dev"]),
+                "axis": "h" if abs(float(state.get("target_vec", (0.0, 0.0))[0])) >= abs(float(state.get("target_vec", (0.0, 0.0))[1])) else "v",
             }
         )
 
@@ -373,6 +384,10 @@ def run_task_block(root, trials, distances_px, radii_px, seed=None, timeout_ms=N
             canvas.coords(text_id, state["width"] / 2.0, state["height"] / 2.0)
 
     def on_click(event):
+        if state["done"]:
+            win.destroy()
+            return
+
         if state.get("awaiting_gate"):
             gx = state["width"] / 2.0
             gy = state["height"] / 2.0
@@ -382,6 +397,11 @@ def run_task_block(root, trials, distances_px, radii_px, seed=None, timeout_ms=N
                 if gate_id is not None:
                     canvas.delete(gate_id)
                 draw_target()
+            return
+
+        if not state["started"]:
+            state["started"] = True
+            draw_target()
             return
 
         if not state["started"] or state["done"]:
@@ -441,6 +461,7 @@ def run_task_block(root, trials, distances_px, radii_px, seed=None, timeout_ms=N
                 "correction_time": float(correction_time) if correction_time is not None else None,
                 "avg_perp_dev": float(avg_perp_dev),
                 "max_perp_dev": float(state["max_perp_dev"]),
+                "axis": "h" if abs(float(state.get("target_vec", (0.0, 0.0))[0])) >= abs(float(state.get("target_vec", (0.0, 0.0))[1])) else "v",
             }
         )
 
