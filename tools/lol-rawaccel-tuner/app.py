@@ -132,7 +132,7 @@ def _default_config():
                 "Marathon": {
                     "max_iters": 120,
                     "confidence_threshold": 0.97,
-                    "history_limit": 24,
+                    "history_limit": 50,
                     "temperature": 0.2,
                     "baseline_recheck_every": 12,
                     "baseline_drop_ratio": 0.82,
@@ -2370,21 +2370,91 @@ class App(tk.Tk):
                 notes = "Prefer stable improvements. Keep motivity>1, gamma>0, syncSpeed>0, smooth in [0,1]."
                 if stage == "axis":
                     notes = notes + " Axis stage: ONLY change yToXRatio; keep syncSpeed/motivity/gamma/smooth the same."
+
+                hist = sess.get("history")
+                if not isinstance(hist, list):
+                    hist = []
+
+                def _sig(c):
+                    if not isinstance(c, dict):
+                        return None
+                    return (
+                        round(float(c.get("syncSpeed", 0.0)), 6),
+                        round(float(c.get("motivity", 0.0)), 6),
+                        round(float(c.get("gamma", 0.0)), 6),
+                        round(float(c.get("smooth", 0.0)), 6),
+                        round(float(c.get("yToXRatio", 1.0)), 6),
+                    )
+
+                def _top_k(rows, k):
+                    rows = [r for r in rows if isinstance(r, dict) and math.isfinite(float(r.get("score", float("nan"))))]
+                    rows.sort(key=lambda r: float(r.get("score", float("-inf"))), reverse=True)
+                    out = []
+                    seen = set()
+                    for r in rows:
+                        sig = _sig(r.get("candidate"))
+                        if sig is None or sig in seen:
+                            continue
+                        seen.add(sig)
+                        out.append(
+                            {
+                                "iter": int(r.get("iter", 0)),
+                                "score": float(r.get("score", 0.0)),
+                                "score_mean": float(r.get("score_mean", r.get("score", 0.0))),
+                                "score_std": float(r.get("score_std", 0.0)),
+                                "candidate": r.get("candidate"),
+                                "summary": _ai_eval_summary(r.get("eval")),
+                            }
+                        )
+                        if len(out) >= k:
+                            break
+                    return out
+
+                def _recent(rows, k):
+                    rows2 = [r for r in rows if isinstance(r, dict)]
+                    rows2.sort(key=lambda r: int(r.get("iter", 0)))
+                    rows2 = rows2[-k:]
+                    out = []
+                    for r in rows2:
+                        out.append(
+                            {
+                                "iter": int(r.get("iter", 0)),
+                                "score": float(r.get("score", 0.0)),
+                                "score_mean": float(r.get("score_mean", r.get("score", 0.0))),
+                                "score_std": float(r.get("score_std", 0.0)),
+                                "candidate": r.get("candidate"),
+                                "summary": _ai_eval_summary(r.get("eval")),
+                            }
+                        )
+                    return out
+
+                recent = _recent(hist, 8)
+                top = _top_k(hist, 5)
+                noise_est = float(sess.get("noise_est", 0.0))
+                step_frac = float(sess.get("step_frac", 0.25))
+                no_improve = int(sess.get("no_improve", 0))
+                best_score = float(sess.get("best_score", float("-inf")))
+
+                trend = {
+                    "stage": stage,
+                    "iter": int(it),
+                    "no_improve": no_improve,
+                    "step_frac": step_frac,
+                    "noise_est": noise_est,
+                    "eval_repeats": int(sess.get("eval_repeats", 1)),
+                    "best_score": best_score,
+                    "best_candidate": dict(sess.get("best", {})) if isinstance(sess.get("best"), dict) else None,
+                    "second_score": float(sess.get("second_score", float("-inf"))),
+                    "second_candidate": dict(sess.get("second", {})) if isinstance(sess.get("second"), dict) else None,
+                    "top": top,
+                    "recent": recent,
+                }
                 state = {
                     "mode": "synchronous",
                     "bounds": bounds,
                     "fixed": {"outputDpi": float(sess["fixed_dpi"])},
-                    "history": [
-                        {
-                            "iter": int(h["iter"]),
-                            "candidate": h["candidate"],
-                            "score": float(h["score"]),
-                            "score_mean": float(h.get("score_mean", h.get("score", 0.0))),
-                            "score_std": float(h.get("score_std", 0.0)),
-                            "summary": _ai_eval_summary(h["eval"]),
-                        }
-                        for h in sess["history"]
-                    ],
+                    "history": _recent(hist, int(sess.get("history_limit", 12))),
+                    "trend": trend,
                     "best": {
                         "score": float(sess.get("best_score", float("-inf"))),
                         "candidate": dict(sess.get("best", {})),
