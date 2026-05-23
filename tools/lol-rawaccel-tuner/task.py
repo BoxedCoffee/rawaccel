@@ -204,10 +204,22 @@ def run_task_block(root, trials, distances_px, radii_px, seed=None, timeout_ms=N
         avg_overshoots = (sum(a["overshoots"] for a in hits) / float(len(hits))) if hits else 0.0
         avg_reaccels = (sum(a["reaccels"] for a in hits) / float(len(hits))) if hits else 0.0
         avg_time_to_move_ms = (
-            sum(float(a.get("time_to_move", 0.0)) for a in hits) / float(len(hits)) * 1000.0 if hits else 0.0
+            (
+                sum(float(a.get("time_to_move")) for a in hits if a.get("time_to_move") is not None)
+                / float(sum(1 for a in hits if a.get("time_to_move") is not None))
+                * 1000.0
+            )
+            if any(a.get("time_to_move") is not None for a in hits)
+            else 0.0
         )
         avg_correction_ms = (
-            sum(float(a.get("correction_time", 0.0)) for a in hits) / float(len(hits)) * 1000.0 if hits else 0.0
+            (
+                sum(float(a.get("correction_time")) for a in hits if a.get("correction_time") is not None)
+                / float(sum(1 for a in hits if a.get("correction_time") is not None))
+                * 1000.0
+            )
+            if any(a.get("correction_time") is not None for a in hits)
+            else 0.0
         )
         avg_bias_x = (sum(float(a.get("bias_x", 0.0)) for a in attempts) / float(len(attempts))) if attempts else 0.0
         avg_bias_y = (sum(float(a.get("bias_y", 0.0)) for a in attempts) / float(len(attempts))) if attempts else 0.0
