@@ -106,6 +106,8 @@ def _default_config():
                     "max_step_frac": 0.45,
                     "start_step_frac": 0.30,
                     "eval_repeats": 2,
+                    "eval_repeats_min": 1,
+                    "repeat_gate_ratio": 0.05,
                     "axis_iters": 8,
                     "max_no_improve": 16,
                     "final_confirm_repeats": 6,
@@ -126,11 +128,35 @@ def _default_config():
                     "max_step_frac": 0.25,
                     "start_step_frac": 0.14,
                     "eval_repeats": 2,
+                    "eval_repeats_min": 1,
+                    "repeat_gate_ratio": 0.05,
                     "axis_iters": 6,
                     "max_no_improve": 12,
                     "final_confirm_repeats": 4,
                     "plateau_stop": True,
                     "selection_metric": "median",
+                    "stability_k": 0.5,
+                },
+                "Balanced": {
+                    "max_iters": 60,
+                    "confidence_threshold": 0.94,
+                    "history_limit": 30,
+                    "temperature": 0.2,
+                    "baseline_recheck_every": 12,
+                    "baseline_drop_ratio": 0.83,
+                    "confirm_repeats": 4,
+                    "confirm_win_rate": 0.67,
+                    "min_step_frac": 0.07,
+                    "max_step_frac": 0.45,
+                    "start_step_frac": 0.26,
+                    "eval_repeats": 3,
+                    "eval_repeats_min": 1,
+                    "repeat_gate_ratio": 0.04,
+                    "axis_iters": 10,
+                    "max_no_improve": 24,
+                    "final_confirm_repeats": 8,
+                    "plateau_stop": True,
+                    "selection_metric": "stable",
                     "stability_k": 0.5,
                 },
                 "Marathon": {
@@ -146,6 +172,8 @@ def _default_config():
                     "max_step_frac": 0.50,
                     "start_step_frac": 0.28,
                     "eval_repeats": 3,
+                    "eval_repeats_min": 1,
+                    "repeat_gate_ratio": 0.04,
                     "axis_iters": 14,
                     "max_no_improve": 40,
                     "final_confirm_repeats": 10,
@@ -166,6 +194,8 @@ def _default_config():
             "max_step_frac": 0.35,
             "start_step_frac": 0.25,
             "eval_repeats": 1,
+            "eval_repeats_min": 1,
+            "repeat_gate_ratio": 0.05,
             "axis_iters": 0,
             "max_no_improve": 6,
             "final_confirm_repeats": 0,
@@ -1958,6 +1988,8 @@ class App(tk.Tk):
             "noise_est": float(state.get("noise_est", 0.0)),
             "runs_per_eval": int(state.get("runs_per_eval", 1)),
             "eval_repeats": int(state.get("eval_repeats", 1)),
+            "eval_repeats_min": int(state.get("eval_repeats_min", 1)),
+            "repeat_gate_ratio": float(state.get("repeat_gate_ratio", 0.05)),
             "axis_iters": int(state.get("axis_iters", 0)),
             "max_no_improve": int(state.get("max_no_improve", 6)),
             "final_confirm_repeats": int(state.get("final_confirm_repeats", 0)),
@@ -2245,22 +2277,54 @@ class App(tk.Tk):
         )
 
         seed_base = int(sess.get("seed_base", 0))
-        eval_repeats = int(sess.get("eval_repeats", 1))
-        eval_repeats = max(1, eval_repeats)
+        eval_repeats_max = max(1, int(sess.get("eval_repeats", 1)))
+        eval_repeats_min = max(1, int(sess.get("eval_repeats_min", 1)))
+        eval_repeats_min = min(eval_repeats_min, eval_repeats_max)
         rep_seed0 = seed_base + 50000 + it * 1000
 
+        repeat_gate_ratio = float(sess.get("repeat_gate_ratio", 0.05))
+
         repeat_runs = []
-        for rep in range(eval_repeats):
+
+        def run_one(rep):
             ev = self._eval_drills(
                 rep_seed0 + rep * 10,
                 baseline=sess.get("baseline"),
                 progress_hook=self._progress_hook,
             )
             if ev is None:
+                return None
+            return (float(ev.get("combined_score", float("-inf"))), ev)
+
+        for rep in range(eval_repeats_min):
+            out = run_one(rep)
+            if out is None:
                 self._stop_requested = True
                 self._finish("Stopped")
                 return
-            repeat_runs.append((float(ev.get("combined_score", float("-inf"))), ev))
+            repeat_runs.append(out)
+
+        def current_median_score():
+            xs = sorted(float(s) for s, _ in repeat_runs)
+            return float(xs[len(xs) // 2]) if xs else float("-inf")
+
+        def should_refine():
+            best = float(sess.get("best_score", float("-inf")))
+            if not math.isfinite(best):
+                return True
+            noise = float(sess.get("noise_est", 0.0))
+            margin = max(abs(best) * float(repeat_gate_ratio), noise)
+            return current_median_score() >= (best - margin)
+
+        rep = eval_repeats_min
+        while rep < eval_repeats_max and should_refine():
+            out = run_one(rep)
+            if out is None:
+                self._stop_requested = True
+                self._finish("Stopped")
+                return
+            repeat_runs.append(out)
+            rep += 1
 
         repeat_runs.sort(key=lambda x: x[0])
         score = float(repeat_runs[len(repeat_runs) // 2][0])
