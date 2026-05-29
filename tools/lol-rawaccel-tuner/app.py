@@ -110,6 +110,8 @@ def _default_config():
                     "max_no_improve": 16,
                     "final_confirm_repeats": 6,
                     "plateau_stop": True,
+                    "selection_metric": "median",
+                    "stability_k": 0.5,
                 },
                 "Fine tune": {
                     "max_iters": 22,
@@ -128,6 +130,8 @@ def _default_config():
                     "max_no_improve": 12,
                     "final_confirm_repeats": 4,
                     "plateau_stop": True,
+                    "selection_metric": "median",
+                    "stability_k": 0.5,
                 },
                 "Marathon": {
                     "max_iters": 120,
@@ -146,6 +150,8 @@ def _default_config():
                     "max_no_improve": 40,
                     "final_confirm_repeats": 10,
                     "plateau_stop": False,
+                    "selection_metric": "stable",
+                    "stability_k": 0.5,
                 },
             },
             "max_iters": 18,
@@ -164,6 +170,8 @@ def _default_config():
             "max_no_improve": 6,
             "final_confirm_repeats": 0,
             "plateau_stop": True,
+            "selection_metric": "median",
+            "stability_k": 0.5,
         },
     }
 
@@ -1806,6 +1814,8 @@ class App(tk.Tk):
             "history_limit": int(sess.get("history_limit", 0)),
             "temperature": float(sess.get("temperature", 0.0)),
             "no_improve": int(sess.get("no_improve", 0)),
+            "selection_metric": str(sess.get("selection_metric", "median")),
+            "stability_k": float(sess.get("stability_k", 0.5)),
             "step_frac": float(sess.get("step_frac", 0.0)),
             "min_step_frac": float(sess.get("min_step_frac", 0.0)),
             "max_step_frac": float(sess.get("max_step_frac", 0.0)),
@@ -1952,6 +1962,8 @@ class App(tk.Tk):
             "max_no_improve": int(state.get("max_no_improve", 6)),
             "final_confirm_repeats": int(state.get("final_confirm_repeats", 0)),
             "plateau_stop": bool(state.get("plateau_stop", True)),
+            "selection_metric": str(state.get("selection_metric", "median") or "median"),
+            "stability_k": float(state.get("stability_k", 0.5)),
             "dual_enabled": bool(dual_enabled_saved),
             "baseline_candidate": state.get("baseline_candidate"),
             "baseline_score": state.get("baseline_score"),
@@ -2055,6 +2067,10 @@ class App(tk.Tk):
         max_no_improve = int(ai_cfg.get("max_no_improve", 6))
         final_confirm_repeats = int(ai_cfg.get("final_confirm_repeats", 0))
         plateau_stop = bool(ai_cfg.get("plateau_stop", True))
+        selection_metric = str(ai_cfg.get("selection_metric", "median") or "median").strip().lower()
+        if selection_metric not in ("median", "stable"):
+            selection_metric = "median"
+        stability_k = float(ai_cfg.get("stability_k", 0.5))
 
         dual_cfg = self.cfg.get("dual_drills")
         dual_enabled = isinstance(dual_cfg, dict) and bool(dual_cfg.get("enabled"))
@@ -2123,6 +2139,8 @@ class App(tk.Tk):
             "max_no_improve": int(max(0, max_no_improve)),
             "final_confirm_repeats": int(max(0, final_confirm_repeats)),
             "plateau_stop": bool(plateau_stop),
+            "selection_metric": str(selection_metric),
+            "stability_k": float(stability_k),
             "dual_enabled": bool(dual_enabled),
             "baseline_candidate": None,
             "baseline_score": None,
@@ -2276,12 +2294,18 @@ class App(tk.Tk):
         if len(sess["history"]) > int(sess["history_limit"]):
             sess["history"] = sess["history"][len(sess["history"]) - int(sess["history_limit"]) :]
 
-        improved = score > float(sess.get("best_score", float("-inf")))
+        selection_metric = str(sess.get("selection_metric", "median") or "median")
+        stability_k = float(sess.get("stability_k", 0.5))
+        metric_score = float(score)
+        if selection_metric == "stable":
+            metric_score = float(score_mean) - float(stability_k) * float(score_std)
+
+        improved = metric_score > float(sess.get("best_score", float("-inf")))
         if improved:
             prev_best = sess.get("best")
             prev_best_sig = sess.get("best_sig")
             prev_best_score = float(sess.get("best_score", float("-inf")))
-            sess["best_score"] = score
+            sess["best_score"] = float(metric_score)
             sess["best"] = dict(full)
             sess["best_sig"] = (
                 round(float(full.get("syncSpeed", 0.0)), 6),
@@ -2296,7 +2320,7 @@ class App(tk.Tk):
                 sess["second_sig"] = prev_best_sig
             sess["no_improve"] = 0
             self.best_var.set(
-                f"Best {score:.3f}: DPI={full['outputDpi']:.1f} sync={full['syncSpeed']:.3f} mot={full['motivity']:.3f} g={full['gamma']:.3f} s={full['smooth']:.3f} yx={float(full.get('yToXRatio', 1.0)):.3f}"
+                f"Best {float(metric_score):.3f} (raw {score:.3f}): DPI={full['outputDpi']:.1f} sync={full['syncSpeed']:.3f} mot={full['motivity']:.3f} g={full['gamma']:.3f} s={full['smooth']:.3f} yx={float(full.get('yToXRatio', 1.0)):.3f}"
             )
         else:
             sess["no_improve"] = int(sess.get("no_improve", 0)) + 1
@@ -2307,9 +2331,9 @@ class App(tk.Tk):
                 round(float(full.get("smooth", 0.0)), 6),
                 round(float(full.get("yToXRatio", 1.0)), 6),
             )
-            if sig != sess.get("best_sig") and score > float(sess.get("second_score", float("-inf"))):
+            if sig != sess.get("best_sig") and metric_score > float(sess.get("second_score", float("-inf"))):
                 sess["second"] = dict(full)
-                sess["second_score"] = float(score)
+                sess["second_score"] = float(metric_score)
                 sess["second_sig"] = sig
 
         scores = [float(h.get("score", 0.0)) for h in sess.get("history", []) if math.isfinite(float(h.get("score", 0.0)))]
@@ -2471,6 +2495,8 @@ class App(tk.Tk):
                         "noise_est": float(sess.get("noise_est", 0.0)),
                         "eval_repeats": int(sess.get("eval_repeats", 1)),
                         "stage": stage,
+                        "selection_metric": str(sess.get("selection_metric", "median")),
+                        "stability_k": float(sess.get("stability_k", 0.5)),
                     },
                 }
 
