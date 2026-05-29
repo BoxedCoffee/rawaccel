@@ -380,7 +380,7 @@ class App(tk.Tk):
         tk.Button(frm_actions, text="Open runs", command=self._open_runs).grid(row=0, column=9, **pad)
 
         tk.Label(frm_actions, text="AI preset").grid(row=1, column=0, sticky="w", **pad)
-        tk.OptionMenu(frm_actions, self.ai_preset_var, "Custom", "Wide tune", "Fine tune", "Marathon").grid(row=1, column=1, sticky="w", **pad)
+        tk.OptionMenu(frm_actions, self.ai_preset_var, "Custom", "Wide tune", "Fine tune", "Balanced", "Marathon").grid(row=1, column=1, sticky="w", **pad)
         tk.Button(frm_actions, text="Resume AI", command=self._resume_ai_tune).grid(row=1, column=2, sticky="w", **pad)
 
         frm_status = tk.LabelFrame(self, text="Status")
