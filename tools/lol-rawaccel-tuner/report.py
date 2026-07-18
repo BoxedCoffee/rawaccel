@@ -102,7 +102,7 @@ def write_report(csv_path, out_path=None, title="Run report"):
     for _, s, r in top:
         table_rows.append(
             "<tr>"
-            + td(r.get("idx"))
+            + td(r.get("idx") or r.get("iter"))
             + td(f"{s:.4f}")
             + td(r.get("outputDpi"))
             + td(r.get("syncSpeed"))
