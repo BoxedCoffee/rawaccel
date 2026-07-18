@@ -90,6 +90,70 @@ def write_report(csv_path, out_path=None, title="Run report"):
 
     combined.sort(key=lambda x: x[0])
 
+    confirm_segments = []
+    cur = []
+    for r in rows:
+        phase = (r.get("phase") or "").strip()
+        tag = (r.get("tag") or "").strip()
+        if phase == "confirm" and tag in ("best", "second", "challenger"):
+            cur.append(r)
+        else:
+            if cur:
+                confirm_segments.append(cur)
+                cur = []
+    if cur:
+        confirm_segments.append(cur)
+
+    confirm_html = ""
+    if confirm_segments:
+        seg = confirm_segments[-1]
+        pairs = []
+        buf = {}
+        for r in seg:
+            tag = (r.get("tag") or "").strip()
+            sc = _safe_float(r.get("score"), None)
+            if sc is None or not math.isfinite(float(sc)):
+                continue
+            if tag == "challenger":
+                tag = "second"
+            if tag not in ("best", "second"):
+                continue
+            buf[tag] = float(sc)
+            if "best" in buf and "second" in buf:
+                pairs.append({"best": float(buf["best"]), "second": float(buf["second"])})
+                buf = {}
+
+        if pairs:
+            best_scores = [p["best"] for p in pairs]
+            second_scores = [p["second"] for p in pairs]
+            diffs = [b - s for b, s in zip(best_scores, second_scores)]
+
+            wins = sum(1 for d in diffs if d >= 0.0)
+            win_rate = wins / float(len(diffs)) if diffs else 0.0
+
+            best_mean = sum(best_scores) / float(len(best_scores))
+            second_mean = sum(second_scores) / float(len(second_scores))
+            best_std = (sum((x - best_mean) ** 2 for x in best_scores) / float(len(best_scores))) ** 0.5 if len(best_scores) >= 2 else 0.0
+            second_std = (sum((x - second_mean) ** 2 for x in second_scores) / float(len(second_scores))) ** 0.5 if len(second_scores) >= 2 else 0.0
+            diff_mean = best_mean - second_mean
+            diff_std = (sum((x - diff_mean) ** 2 for x in diffs) / float(len(diffs))) ** 0.5 if len(diffs) >= 2 else 0.0
+            margin = max(0.5 * diff_std, 0.01 * abs(second_mean))
+
+            winner = "Too close"
+            if diff_mean >= margin and win_rate >= 0.6:
+                winner = "Best"
+            if (-diff_mean) >= margin and (1.0 - win_rate) >= 0.6:
+                winner = "#2"
+
+            confirm_html = (
+                "<div class='card'>"
+                "<h2>Confirm</h2>"
+                f"<p><b>Winner</b>: {html.escape(winner)}</p>"
+                f"<p>Rounds={len(pairs)} | Win rate (Best)={win_rate*100:.0f}% | Mean diff (Best-#2)={diff_mean:+.4f} (margin {margin:.4f})</p>"
+                f"<p>Best mean±std: {best_mean:.4f} ± {best_std:.4f} | #2 mean±std: {second_mean:.4f} ± {second_std:.4f}</p>"
+                "</div>"
+            )
+
     best = max(combined, key=lambda x: x[1])[2] if combined else None
     top = sorted(combined, key=lambda x: x[1], reverse=True)[:10]
 
@@ -213,12 +277,13 @@ h3 {{ margin: 0 0 10px 0; font-size: 15px; color: #e5e7eb; }}
 </head>
 <body>
 <h1>{html.escape(title)}</h1>
-<div class='card'>
-{summary}
-{chart}
-</div>
-<div class='card'>
-<h2>Top candidates</h2>
+  <div class='card'>
+  {summary}
+  {chart}
+  </div>
+  {confirm_html}
+  <div class='card'>
+  <h2>Top candidates</h2>
 <table>
 <thead><tr><th>idx</th><th>score</th><th>outputDpi</th><th>syncSpeed</th><th>motivity</th><th>gamma</th><th>smooth</th><th>yToXRatio</th></tr></thead>
 <tbody>
