@@ -50,3 +50,4 @@ If `dual_drills.enabled=true`, each evaluation is two blocks (micro + flick), so
 ## Notes
 - The app writes candidate settings to `./runs/<timestamp>/candidate.json` and calls `writer.exe` to apply.
 - Use the app’s Restore button to re-apply your original settings.
+- AI run reports include a 360° directional weakness table (micro/flick).

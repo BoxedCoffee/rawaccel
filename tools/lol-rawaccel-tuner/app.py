@@ -503,6 +503,7 @@ class App(tk.Tk):
             seed=int(seed),
             timeout_ms=int(cfg.get("timeout_ms", 0)),
             start_gate=bool(cfg.get("start_gate", False)),
+            dir_bins=int(cfg.get("dir_bins", 16)),
         )
         if result is not None and progress_hook is not None:
             try:
@@ -2179,7 +2180,7 @@ class App(tk.Tk):
 
         log_path = run_dir / "results.csv"
         log_path.write_text(
-            "phase,iter,score,confidence,reason,tag,throughput,miss_rate,p90_error,pathEff,perpDev,overshoots,reaccels,timeToMoveMs,correctionMs,biasX,biasY,h_miss_rate,v_miss_rate,h_p90_error,v_p90_error,outputDpi,syncSpeed,motivity,gamma,smooth,yToXRatio\n",
+            "phase,iter,score,confidence,reason,tag,throughput,miss_rate,p90_error,pathEff,perpDev,overshoots,reaccels,timeToMoveMs,correctionMs,biasX,biasY,h_miss_rate,v_miss_rate,h_p90_error,v_p90_error,outputDpi,syncSpeed,motivity,gamma,smooth,yToXRatio,weakness_path\n",
             encoding="utf-8",
         )
 
@@ -2293,11 +2294,11 @@ class App(tk.Tk):
             score0 = float(ev0.get("combined_score", float("-inf")))
             ratio = (score0 / float(baseline_score0)) if float(baseline_score0) != 0 else 1.0
             with open(sess["log_path"], "a", encoding="utf-8") as f:
-                f.write(
-                    f"baseline,{it},{float(score0):.6f},0.000,{json.dumps(f'ratio={ratio:.3f}')},combined,"
-                    f"0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,{float(sess['fixed_dpi']):.3f},"
-                    f"{float(full0['syncSpeed']):.6f},{float(full0['motivity']):.6f},{float(full0['gamma']):.6f},{float(full0['smooth']):.6f},{float(full0.get('yToXRatio', 1.0)):.6f}\n"
-                )
+                    f.write(
+                        f"baseline,{it},{float(score0):.6f},0.000,{json.dumps(f'ratio={ratio:.3f}')},combined,"
+                        f"0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,{float(sess['fixed_dpi']):.3f},"
+                        f"{float(full0['syncSpeed']):.6f},{float(full0['motivity']):.6f},{float(full0['gamma']):.6f},{float(full0['smooth']):.6f},{float(full0.get('yToXRatio', 1.0)):.6f},\n"
+                    )
 
             if ratio < float(sess.get("baseline_drop_ratio", 0.85)):
                 cont = messagebox.askyesno(
@@ -2491,6 +2492,24 @@ class App(tk.Tk):
         sess["step_frac"] = float(min(max_step, max(min_step, step_frac)))
 
         def log_one(tag, r, s, conf, reason):
+            weakness_path = ""
+            if isinstance(r, dict) and (isinstance(r.get("dir_bins"), dict) or isinstance(r.get("dir_summary"), dict)):
+                weakness_path = f"weakness_{it:03d}_{tag}.json"
+                try:
+                    (pathlib.Path(sess["run_dir"]) / weakness_path).write_text(
+                        json.dumps(
+                            {
+                                "tag": str(tag),
+                                "iter": int(it),
+                                "dir_bins": r.get("dir_bins"),
+                                "dir_summary": r.get("dir_summary"),
+                            },
+                            ensure_ascii=False,
+                        ),
+                        encoding="utf-8",
+                    )
+                except Exception:
+                    weakness_path = ""
             with open(sess["log_path"], "a", encoding="utf-8") as f:
                 f.write(
                     f"ai,{it},{float(s):.6f},{float(conf):.3f},{json.dumps(str(reason)[:200])},{tag},"
@@ -2500,7 +2519,7 @@ class App(tk.Tk):
                     f"{float(r.get('avg_bias_x', 0.0)):.6f},{float(r.get('avg_bias_y', 0.0)):.6f},"
                     f"{float(r.get('h_miss_rate', 1.0)):.6f},{float(r.get('v_miss_rate', 1.0)):.6f},"
                     f"{float(r.get('h_p90_error_px', 0.0)):.6f},{float(r.get('v_p90_error_px', 0.0)):.6f},"
-                    f"{float(full['outputDpi']):.3f},{float(full['syncSpeed']):.6f},{float(full['motivity']):.6f},{float(full['gamma']):.6f},{float(full['smooth']):.6f},{float(full.get('yToXRatio', 1.0)):.6f}\n"
+                    f"{float(full['outputDpi']):.3f},{float(full['syncSpeed']):.6f},{float(full['motivity']):.6f},{float(full['gamma']):.6f},{float(full['smooth']):.6f},{float(full.get('yToXRatio', 1.0)):.6f},{weakness_path}\n"
                 )
 
         if "single" in eval_res:
@@ -2650,14 +2669,42 @@ class App(tk.Tk):
         def _ai_eval_summary(ev):
             if not isinstance(ev, dict):
                 return {}
+
+            def pack(r):
+                if not isinstance(r, dict):
+                    return {}
+                out = {}
+                for k in (
+                    "throughput",
+                    "miss_rate",
+                    "p90_error_px",
+                    "avg_path_eff",
+                    "avg_perp_dev",
+                    "avg_overshoots",
+                    "avg_reaccels",
+                    "avg_time_to_move_ms",
+                    "avg_correction_ms",
+                    "avg_bias_x",
+                    "avg_bias_y",
+                    "h_miss_rate",
+                    "v_miss_rate",
+                    "h_p90_error_px",
+                    "v_p90_error_px",
+                ):
+                    if k in r and r.get(k) is not None:
+                        out[k] = r.get(k)
+                if isinstance(r.get("dir_summary"), dict):
+                    out["dir_summary"] = r.get("dir_summary")
+                return out
+
             if "single" in ev:
-                return {"score": float(ev.get("combined_score", 0.0)), "single": ev["single"]}
+                return {"score": float(ev.get("combined_score", 0.0)), "single": pack(ev["single"])}
             return {
                 "score": float(ev.get("combined_score", 0.0)),
                 "micro_score": float(ev.get("micro_score", 0.0)),
                 "flick_score": float(ev.get("flick_score", 0.0)),
-                "micro": ev.get("micro"),
-                "flick": ev.get("flick"),
+                "micro": pack(ev.get("micro")),
+                "flick": pack(ev.get("flick")),
             }
 
         thread = threading.Thread(target=worker, daemon=True)
@@ -2723,7 +2770,7 @@ class App(tk.Tk):
         self.ai_var.set(ai_line)
 
         with open(sess["log_path"], "a", encoding="utf-8") as f:
-            f.write(f"ai,{int(sess['iter'])},0.000000,{conf:.3f},{json.dumps(reason[:200])},ai_note,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,{float(sess['fixed_dpi']):.3f},{cand2['syncSpeed']:.6f},{cand2['motivity']:.6f},{cand2['gamma']:.6f},{cand2['smooth']:.6f},{float(cand2.get('yToXRatio', 1.0)):.6f}\n")
+            f.write(f"ai,{int(sess['iter'])},0.000000,{conf:.3f},{json.dumps(reason[:200])},ai_note,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,{float(sess['fixed_dpi']):.3f},{cand2['syncSpeed']:.6f},{cand2['motivity']:.6f},{cand2['gamma']:.6f},{cand2['smooth']:.6f},{float(cand2.get('yToXRatio', 1.0)):.6f},\n")
 
         if stop and conf >= float(sess["confidence_threshold"]) and int(sess["iter"]) >= 3:
             best = sess.get("best")
@@ -2960,7 +3007,7 @@ class App(tk.Tk):
                 f.write(
                     f"confirm,{int(sess.get('iter',0))},{sc:.6f},0.000,{json.dumps('confirm')},{side},"
                     f"0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,{float(sess['fixed_dpi']):.3f},"
-                    f"{float(cand_full.get('syncSpeed', 0.0)):.6f},{float(cand_full.get('motivity', 0.0)):.6f},{float(cand_full.get('gamma', 0.0)):.6f},{float(cand_full.get('smooth', 0.0)):.6f},{float(cand_full.get('yToXRatio', 1.0)):.6f}\n"
+                    f"{float(cand_full.get('syncSpeed', 0.0)):.6f},{float(cand_full.get('motivity', 0.0)):.6f},{float(cand_full.get('gamma', 0.0)):.6f},{float(cand_full.get('smooth', 0.0)):.6f},{float(cand_full.get('yToXRatio', 1.0)):.6f},\n"
                 )
 
         pairs = conf.get("pairs")

@@ -4,7 +4,7 @@ import time
 import tkinter as tk
 
 
-def run_task_block(root, trials, distances_px, radii_px, seed=None, timeout_ms=None, start_gate=False):
+def run_task_block(root, trials, distances_px, radii_px, seed=None, timeout_ms=None, start_gate=False, dir_bins=16):
     rng = random.Random(seed)
 
     win = tk.Toplevel(root)
@@ -62,6 +62,9 @@ def run_task_block(root, trials, distances_px, radii_px, seed=None, timeout_ms=N
         "target": None,
         "done": False,
         "result": None,
+        "dir_bins": int(max(4, dir_bins)),
+        "dir_angle_deg": None,
+        "dir_bin": None,
     }
 
     text_id = canvas.create_text(
@@ -123,6 +126,11 @@ def run_task_block(root, trials, distances_px, radii_px, seed=None, timeout_ms=N
 
         state["start_pos"] = start_pos
         state["target_vec"] = (float(x - start_pos[0]), float(y - start_pos[1]))
+
+        angle_deg = (math.degrees(math.atan2(float(state["target_vec"][1]), float(state["target_vec"][0]))) + 360.0) % 360.0
+        bin_w = 360.0 / float(max(1, int(state.get("dir_bins", 16))))
+        state["dir_angle_deg"] = float(angle_deg)
+        state["dir_bin"] = int(angle_deg // bin_w) % int(max(1, int(state.get("dir_bins", 16))))
         state["target_start"] = now
         state["first_move_t"] = None
         state["first_enter_t"] = None
@@ -227,6 +235,56 @@ def run_task_block(root, trials, distances_px, radii_px, seed=None, timeout_ms=N
             sum(float(a.get("avg_perp_dev", 0.0)) for a in hits) / float(len(hits)) if hits else 0.0
         )
 
+        bins = int(state.get("dir_bins", 0))
+        dir_bins_obj = None
+        dir_summary = None
+        if bins > 0 and attempts:
+            bin_w = 360.0 / float(bins)
+            rows = []
+            for i in range(bins):
+                group = [a for a in attempts if int(a.get("dir_bin", -1)) == i]
+                if group:
+                    group_errors = sorted(float(a.get("endpoint_error", 0.0)) for a in group)
+                    group_hits = [a for a in group if a.get("hit")]
+                    miss_rate_i = 1.0 - (len(group_hits) / float(len(group))) if group else 1.0
+
+                    correction_ms = [float(a.get("correction_time")) * 1000.0 for a in group_hits if a.get("correction_time") is not None]
+                    move_ms = [float(a.get("time_to_move")) * 1000.0 for a in group_hits if a.get("time_to_move") is not None]
+
+                    avg_correction_ms = (sum(correction_ms) / float(len(correction_ms))) if correction_ms else 0.0
+                    avg_time_to_move_ms = (sum(move_ms) / float(len(move_ms))) if move_ms else 0.0
+                else:
+                    group_errors = []
+                    miss_rate_i = 1.0
+                    avg_correction_ms = 0.0
+                    avg_time_to_move_ms = 0.0
+
+                deg0 = float(i) * bin_w
+                deg1 = float(i + 1) * bin_w
+                rows.append(
+                    {
+                        "bin": int(i),
+                        "deg0": float(deg0),
+                        "deg1": float(deg1),
+                        "n": int(len(group_errors)),
+                        "miss_rate": float(miss_rate_i),
+                        "p90_error_px": float(pct(group_errors, 0.9)),
+                        "avg_correction_ms": float(avg_correction_ms),
+                        "avg_time_to_move_ms": float(avg_time_to_move_ms),
+                    }
+                )
+
+            dir_bins_obj = {"bins": int(bins), "rows": rows}
+
+            rows2 = [r for r in rows if int(r.get("n", 0)) > 0]
+            worst_miss = sorted(rows2, key=lambda r: (float(r.get("miss_rate", 0.0)), float(r.get("p90_error_px", 0.0))), reverse=True)[:4]
+            worst_p90 = sorted(rows2, key=lambda r: (float(r.get("p90_error_px", 0.0)), float(r.get("miss_rate", 0.0))), reverse=True)[:4]
+            dir_summary = {
+                "bins": int(bins),
+                "worst_miss": worst_miss,
+                "worst_p90": worst_p90,
+            }
+
         state["result"] = {
             "throughput": float(throughput),
             "miss_rate": float(miss_rate),
@@ -245,6 +303,8 @@ def run_task_block(root, trials, distances_px, radii_px, seed=None, timeout_ms=N
             "v_miss_rate": float(1.0 - (sum(1 for a in vert if a["hit"]) / float(len(vert)))) if vert else float(miss_rate),
             "h_p90_error_px": float(pct(horiz_errors, 0.9)),
             "v_p90_error_px": float(pct(vert_errors, 0.9)),
+            "dir_bins": dir_bins_obj,
+            "dir_summary": dir_summary,
         }
 
         canvas.delete("all")
@@ -313,6 +373,8 @@ def run_task_block(root, trials, distances_px, radii_px, seed=None, timeout_ms=N
                 "avg_perp_dev": float(avg_perp_dev),
                 "max_perp_dev": float(state["max_perp_dev"]),
                 "axis": "h" if abs(float(state.get("target_vec", (0.0, 0.0))[0])) >= abs(float(state.get("target_vec", (0.0, 0.0))[1])) else "v",
+                "dir_bin": int(state.get("dir_bin", 0)),
+                "dir_angle_deg": float(state.get("dir_angle_deg", 0.0)),
             }
         )
 
@@ -480,6 +542,8 @@ def run_task_block(root, trials, distances_px, radii_px, seed=None, timeout_ms=N
                 "avg_perp_dev": float(avg_perp_dev),
                 "max_perp_dev": float(state["max_perp_dev"]),
                 "axis": "h" if abs(float(state.get("target_vec", (0.0, 0.0))[0])) >= abs(float(state.get("target_vec", (0.0, 0.0))[1])) else "v",
+                "dir_bin": int(state.get("dir_bin", 0)),
+                "dir_angle_deg": float(state.get("dir_angle_deg", 0.0)),
             }
         )
 

@@ -1,5 +1,6 @@
 import csv
 import html
+import json
 import math
 import pathlib
 
@@ -56,6 +57,25 @@ def write_report(csv_path, out_path=None, title="Run report"):
         for r in reader:
             rows.append(r)
 
+    weakness = {}
+    for r in rows:
+        idx = r.get("idx")
+        if idx is None:
+            idx = r.get("iter")
+        tag = (r.get("tag") or "").strip()
+        wp = (r.get("weakness_path") or "").strip()
+        if not idx or not tag or not wp:
+            continue
+        try:
+            i = int(float(idx))
+        except Exception:
+            continue
+        try:
+            obj = json.loads((csv_path.parent / wp).read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        weakness[(i, tag)] = obj
+
     combined = []
     for r in rows:
         tag = (r.get("tag") or "").strip()
@@ -95,10 +115,85 @@ def write_report(csv_path, out_path=None, title="Run report"):
 
     summary = ""
     if best is not None:
+        best_idx = best.get("idx")
+        if best_idx is None:
+            best_idx = best.get("iter")
+        try:
+            best_i = int(float(best_idx)) if best_idx is not None else None
+        except Exception:
+            best_i = None
+
+        drill_blocks = ""
+        if best_i is not None:
+            micro = weakness.get((best_i, "micro"))
+            flick = weakness.get((best_i, "flick"))
+            single = weakness.get((best_i, "single"))
+
+            def render_bins(obj, label):
+                if not isinstance(obj, dict):
+                    return ""
+                db = obj.get("dir_bins")
+                if not isinstance(db, dict):
+                    return ""
+                bins = int(db.get("bins", 0) or 0)
+                rr = db.get("rows")
+                if not isinstance(rr, list) or not rr:
+                    return ""
+
+                def td(s, align=None):
+                    if align:
+                        return f"<td style='text-align:{align}'>{html.escape(str(s))}</td>"
+                    return f"<td>{html.escape(str(s))}</td>"
+
+                trows = []
+                for row in rr:
+                    if not isinstance(row, dict):
+                        continue
+                    deg0 = float(row.get("deg0", 0.0))
+                    deg1 = float(row.get("deg1", 0.0))
+                    n = int(row.get("n", 0) or 0)
+                    miss = float(row.get("miss_rate", 0.0) or 0.0)
+                    p90 = float(row.get("p90_error_px", 0.0) or 0.0)
+                    corr = float(row.get("avg_correction_ms", 0.0) or 0.0)
+                    alpha = max(0.0, min(0.75, miss))
+                    bar = f"<div style='height:10px;width:{max(0.0,min(1.0,miss))*100:.0f}%;background:rgba(239,68,68,{alpha:.3f});border-radius:5px'></div>"
+                    trows.append(
+                        "<tr>"
+                        + td(f"{deg0:.0f}–{deg1:.0f}°")
+                        + td(n, align="right")
+                        + td(f"{miss:.3f}", align="right")
+                        + td(f"{p90:.1f}", align="right")
+                        + td(f"{corr:.0f}", align="right")
+                        + f"<td style='width:160px'>{bar}</td>"
+                        + "</tr>"
+                    )
+
+                return (
+                    "<div class='card' style='flex:1'>"
+                    f"<h3>{html.escape(label)} ({bins} bins)</h3>"
+                    "<table>"
+                    "<thead><tr><th>dir</th><th style='text-align:right'>n</th><th style='text-align:right'>miss</th><th style='text-align:right'>p90(px)</th><th style='text-align:right'>corr(ms)</th><th></th></tr></thead>"
+                    f"<tbody>{''.join(trows)}</tbody>"
+                    "</table>"
+                    "</div>"
+                )
+
+            if isinstance(single, dict):
+                drill_blocks = render_bins(single, "Directional weakness")
+            else:
+                blocks = []
+                if isinstance(micro, dict):
+                    blocks.append(render_bins(micro, "Micro"))
+                if isinstance(flick, dict):
+                    blocks.append(render_bins(flick, "Flick"))
+                if blocks:
+                    drill_blocks = "<div style='display:flex;gap:16px;flex-wrap:wrap'>" + "".join(blocks) + "</div>"
+
         summary = (
             f"<p><b>Best</b> score={html.escape(best.get('score',''))} "
             f"DPI={html.escape(best.get('outputDpi',''))} syncSpeed={html.escape(best.get('syncSpeed',''))} "
             f"motivity={html.escape(best.get('motivity',''))} gamma={html.escape(best.get('gamma',''))} smooth={html.escape(best.get('smooth',''))} yToXRatio={html.escape(best.get('yToXRatio',''))}</p>"
+            + drill_blocks
         )
 
     body = f"""
@@ -113,6 +208,7 @@ a {{ color: #60a5fa; }}
 table {{ border-collapse: collapse; width: 100%; }}
 th, td {{ border-bottom: 1px solid #1f2937; padding: 8px 10px; text-align: left; font-size: 13px; }}
 .card {{ background: #0f172a; border: 1px solid #1f2937; border-radius: 10px; padding: 16px; margin: 16px 0; }}
+h3 {{ margin: 0 0 10px 0; font-size: 15px; color: #e5e7eb; }}
 </style>
 </head>
 <body>
