@@ -1290,7 +1290,38 @@ class App(tk.Tk):
         if not ok:
             messagebox.showwarning("Writer", "writer.exe reported an error")
             return
-        self.status_var.set("Best applied")
+
+        also_save = messagebox.askyesno(
+            "Persist",
+            "Apply succeeded. Also overwrite your settings.json so it persists?",
+        )
+        if also_save:
+            settings_path = pathlib.Path(self.settings_var.get().strip())
+            backup = None
+            try:
+                ts = time.strftime("%Y%m%d-%H%M%S")
+                backup = RUNS_DIR / f"settings_backup_{ts}.json"
+                backup.write_bytes(settings_path.read_bytes())
+            except Exception:
+                backup = None
+
+            try:
+                controller.write_candidate_settings(cand, settings_path)
+            except Exception as e:
+                messagebox.showerror("Error", str(e))
+                return
+
+            ok2 = controller.apply_settings(settings_path)
+            if not ok2:
+                messagebox.showwarning("Writer", "writer.exe reported an error")
+                return
+
+            if backup is not None:
+                self.status_var.set(f"Best applied + saved (backup: {backup.name})")
+            else:
+                self.status_var.set("Best applied + saved")
+        else:
+            self.status_var.set("Best applied")
         self._draw_curve(cand)
 
     def _save_best(self):
