@@ -1291,37 +1291,45 @@ class App(tk.Tk):
             messagebox.showwarning("Writer", "writer.exe reported an error")
             return
 
-        also_save = messagebox.askyesno(
-            "Persist",
-            "Apply succeeded. Also overwrite your settings.json so it persists?",
-        )
-        if also_save:
-            settings_path = pathlib.Path(self.settings_var.get().strip())
+        settings_path = pathlib.Path(self.settings_var.get().strip())
+        backup = None
+        try:
+            ts = time.strftime("%Y%m%d-%H%M%S")
+            backup = RUNS_DIR / f"settings_backup_{ts}.json"
+            backup.write_bytes(settings_path.read_bytes())
+        except Exception:
             backup = None
-            try:
-                ts = time.strftime("%Y%m%d-%H%M%S")
-                backup = RUNS_DIR / f"settings_backup_{ts}.json"
-                backup.write_bytes(settings_path.read_bytes())
-            except Exception:
-                backup = None
 
-            try:
-                controller.write_candidate_settings(cand, settings_path)
-            except Exception as e:
-                messagebox.showerror("Error", str(e))
-                return
+        try:
+            controller.write_candidate_settings(cand, settings_path)
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
+            return
 
-            ok2 = controller.apply_settings(settings_path)
-            if not ok2:
-                messagebox.showwarning("Writer", "writer.exe reported an error")
-                return
+        ok2 = controller.apply_settings(settings_path)
+        if not ok2:
+            messagebox.showwarning("Writer", "writer.exe reported an error")
+            return
 
-            if backup is not None:
-                self.status_var.set(f"Best applied + saved (backup: {backup.name})")
-            else:
-                self.status_var.set("Best applied + saved")
+        dpi_cur = self._read_current_output_dpi(str(settings_path))
+        curve_cur = self._read_current_curve(str(settings_path))
+        yxr_cur = self._read_current_y_to_x_ratio(str(settings_path))
+        ok_verify = True
+        if "outputDpi" in cand and dpi_cur is not None:
+            ok_verify = ok_verify and abs(float(dpi_cur) - float(cand["outputDpi"])) < 1e-6
+        if "yToXRatio" in cand and yxr_cur is not None:
+            ok_verify = ok_verify and abs(float(yxr_cur) - float(cand["yToXRatio"])) < 1e-6
+        if any(k in cand for k in ("syncSpeed", "motivity", "gamma", "smooth")) and curve_cur is not None:
+            for k in ("syncSpeed", "motivity", "gamma", "smooth"):
+                if k in cand and k in curve_cur:
+                    ok_verify = ok_verify and abs(float(curve_cur[k]) - float(cand[k])) < 1e-6
+
+        if backup is not None:
+            self.status_var.set(f"Best applied (saved; backup: {backup.name})")
         else:
-            self.status_var.set("Best applied")
+            self.status_var.set("Best applied (saved)")
+        if not ok_verify:
+            messagebox.showwarning("Verify", "Applied, but settings.json did not match expected values")
         self._draw_curve(cand)
 
     def _save_best(self):
@@ -2050,7 +2058,18 @@ class App(tk.Tk):
         self._stop_requested = False
         self._session = sess
         self.progress_var.set(f"{int(sess.get('current_run', 0))}/{int(sess.get('total_runs', 0))}")
-        self.status_var.set(f"AI tune: resumed (iter {int(sess.get('iter', 0)) + 1}/{int(sess.get('max_iters', 0))})")
+
+        it = int(sess.get("iter", 0))
+        max_iters = int(sess.get("max_iters", 0))
+        axis_total = int(sess.get("axis_iters", 0))
+        if axis_total > 0 and it < axis_total:
+            stage_label = f"Axis {it+1}/{axis_total}"
+        else:
+            curve_total = max(1, max_iters - axis_total) if axis_total > 0 else max(1, max_iters)
+            curve_idx = it - axis_total + 1 if axis_total > 0 else it + 1
+            stage_label = f"Curve {max(1, curve_idx)}/{curve_total}"
+
+        self.status_var.set(f"AI resumed: {stage_label} (iter {it+1}/{max_iters})")
         self.ai_var.set("AI: resumed")
 
         cur_best = sess.get("best")
@@ -2303,9 +2322,21 @@ class App(tk.Tk):
             return
 
         step_frac = float(sess.get("step_frac", 0.25))
-        self.status_var.set(
-            f"AI tune {it+1}/{sess['max_iters']}: sync={full['syncSpeed']:.3f} mot={full['motivity']:.3f} g={full['gamma']:.3f} s={full['smooth']:.3f} yx={float(full.get('yToXRatio', 1.0)):.3f} step={step_frac:.2f}"
+
+        max_iters = int(sess.get("max_iters", 0))
+        axis_total = int(sess.get("axis_iters", 0))
+        if axis_total > 0 and it < axis_total:
+            stage_label = f"Axis {it+1}/{axis_total}"
+        else:
+            curve_total = max(1, max_iters - axis_total) if axis_total > 0 else max(1, max_iters)
+            curve_idx = it - axis_total + 1 if axis_total > 0 else it + 1
+            stage_label = f"Curve {max(1, curve_idx)}/{curve_total}"
+
+        params_line = (
+            f"sync={full['syncSpeed']:.3f} mot={full['motivity']:.3f} g={full['gamma']:.3f} "
+            f"s={full['smooth']:.3f} yx={float(full.get('yToXRatio', 1.0)):.3f} step={step_frac:.2f}"
         )
+        self.status_var.set(f"AI {stage_label} (iter {it+1}/{max_iters}): {params_line}")
 
         seed_base = int(sess.get("seed_base", 0))
         eval_repeats_max = max(1, int(sess.get("eval_repeats", 1)))
@@ -2318,6 +2349,7 @@ class App(tk.Tk):
         repeat_runs = []
 
         def run_one(rep):
+            self.status_var.set(f"AI {stage_label} (iter {it+1}/{max_iters}) rep {rep+1}/{eval_repeats_max}: {params_line}")
             ev = self._eval_drills(
                 rep_seed0 + rep * 10,
                 baseline=sess.get("baseline"),
@@ -2632,7 +2664,7 @@ class App(tk.Tk):
         sess["ai_thread"] = thread
         thread.start()
 
-        self.status_var.set(f"AI tune {it+1}/{sess['max_iters']}: thinking")
+        self.status_var.set(f"AI {stage_label} (iter {it+1}/{max_iters}): thinking")
         self.ai_var.set("AI: waiting for suggestion")
         self.after(200, self._ai_poll)
 
@@ -2896,6 +2928,7 @@ class App(tk.Tk):
             order = ["challenger", "best"]
 
         round_scores = {"best": float("-inf"), "challenger": float("-inf")}
+        label = "Final confirm" if bool(conf.get("final")) else "Confirm"
         for side in order:
             if self._stop_requested:
                 self._finish("Stopped")
@@ -2906,12 +2939,13 @@ class App(tk.Tk):
             path = pathlib.Path(sess["run_dir"]) / f"confirm_{r+1:02d}_{side}.json"
             sess["controller"].write_candidate_settings(cand_full, path)
             sess["controller"].apply_settings(path)
-            self.status_var.set(f"AI tune: confirm {r+1}/{repeats} ({side})")
+            self.status_var.set(f"AI {label} {r+1}/{repeats} ({side})")
 
             eval_repeats = int(sess.get("eval_repeats", 1))
             eval_repeats = max(1, eval_repeats)
             scores = []
             for rep in range(eval_repeats):
+                self.status_var.set(f"AI {label} {r+1}/{repeats} ({side}) rep {rep+1}/{eval_repeats}")
                 ev = self._eval_drills(seed + rep * 10, progress_hook=self._progress_hook)
                 if ev is None:
                     self._stop_requested = True
