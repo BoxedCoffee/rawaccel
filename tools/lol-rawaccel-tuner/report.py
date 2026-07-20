@@ -194,10 +194,86 @@ def write_report(csv_path, out_path=None, title="Run report"):
             best_i = None
 
         drill_blocks = ""
+        diag_blocks = ""
         if best_i is not None:
             micro = weakness.get((best_i, "micro"))
             flick = weakness.get((best_i, "flick"))
             single = weakness.get((best_i, "single"))
+
+            def diagnose(obj, label):
+                if not isinstance(obj, dict):
+                    return ""
+                ds = obj.get("dir_summary")
+                if not isinstance(ds, dict):
+                    return ""
+                worst = []
+                for k in ("worst_miss", "worst_p90"):
+                    xs = ds.get(k)
+                    if not isinstance(xs, list):
+                        continue
+                    for r in xs:
+                        if isinstance(r, dict):
+                            worst.append(r)
+                if not worst:
+                    return ""
+
+                uniq = {}
+                for r in worst:
+                    try:
+                        b = int(r.get("bin"))
+                    except Exception:
+                        continue
+                    if b not in uniq:
+                        uniq[b] = r
+
+                items = list(uniq.values())
+                items.sort(key=lambda r: (float(r.get("miss_rate", 0.0)), float(r.get("p90_error_px", 0.0))), reverse=True)
+                items = items[:4]
+
+                sp33 = _safe_float(ds.get("speed_p33"), 0.0) or 0.0
+                sp66 = _safe_float(ds.get("speed_p66"), 0.0) or 0.0
+
+                vert_votes = 0
+                vert_bias = 0.0
+                high_over = 0
+                low_under = 0
+                for r in items:
+                    deg0 = _safe_float(r.get("deg0"), 0.0) or 0.0
+                    deg1 = _safe_float(r.get("deg1"), 0.0) or 0.0
+                    deg = 0.5 * (deg0 + deg1)
+                    rad = math.radians(float(deg))
+                    vy = abs(math.sin(rad))
+                    bpar = _safe_float(r.get("bias_parallel_mean"), 0.0) or 0.0
+                    spd = _safe_float(r.get("speed_mean"), 0.0) or 0.0
+                    if vy >= 0.85:
+                        vert_votes += 1
+                        vert_bias += float(bpar)
+                    if sp66 > 0 and spd >= sp66 and bpar >= 2.0:
+                        high_over += 1
+                    if sp33 > 0 and spd <= sp33 and bpar <= -2.0:
+                        low_under += 1
+
+                recs = []
+                if vert_votes >= 2:
+                    if vert_bias > 2.0:
+                        recs.append("Vertical-ish overshoot: decrease yToXRatio")
+                    if vert_bias < -2.0:
+                        recs.append("Vertical-ish undershoot: increase yToXRatio")
+                if high_over >= 2:
+                    recs.append("High-speed overshoot: reduce curve aggression (motivity/gamma down or smooth up)")
+                if low_under >= 2:
+                    recs.append("Low-speed undershoot: increase low-speed gain (motivity/gamma down or syncSpeed up)")
+
+                if not recs:
+                    return ""
+
+                lines = "".join(f"<li>{html.escape(s)}</li>" for s in recs)
+                return (
+                    "<div class='card' style='flex:1'>"
+                    f"<h3>Diagnosis ({html.escape(label)})</h3>"
+                    f"<ul style='margin:0;padding-left:18px'>{lines}</ul>"
+                    "</div>"
+                )
 
             def render_bins(obj, label):
                 if not isinstance(obj, dict):
@@ -256,14 +332,24 @@ def write_report(csv_path, out_path=None, title="Run report"):
 
             if isinstance(single, dict):
                 drill_blocks = render_bins(single, "Directional weakness")
+                diag_blocks = diagnose(single, "single")
             else:
                 blocks = []
+                diags = []
                 if isinstance(micro, dict):
                     blocks.append(render_bins(micro, "Micro"))
+                    d = diagnose(micro, "micro")
+                    if d:
+                        diags.append(d)
                 if isinstance(flick, dict):
                     blocks.append(render_bins(flick, "Flick"))
+                    d = diagnose(flick, "flick")
+                    if d:
+                        diags.append(d)
                 if blocks:
                     drill_blocks = "<div style='display:flex;gap:16px;flex-wrap:wrap'>" + "".join(blocks) + "</div>"
+                if diags:
+                    diag_blocks = "<div style='display:flex;gap:16px;flex-wrap:wrap'>" + "".join(diags) + "</div>"
 
         raw_s = _safe_float(best.get("score"), None)
         metric_s = _safe_float(best.get("metric_score"), None)
@@ -290,6 +376,7 @@ def write_report(csv_path, out_path=None, title="Run report"):
             f"DPI={html.escape(best.get('outputDpi',''))} syncSpeed={html.escape(best.get('syncSpeed',''))} "
             f"motivity={html.escape(best.get('motivity',''))} gamma={html.escape(best.get('gamma',''))} smooth={html.escape(best.get('smooth',''))} yToXRatio={html.escape(best.get('yToXRatio',''))}</p>"
             + drill_blocks
+            + diag_blocks
         )
 
     body = f"""
