@@ -62,6 +62,8 @@ def _default_config():
             "start_gate": True,
             "distances_px": [140, 240, 360],
             "radii_px": [10, 14, 20],
+            "dir_bins": 16,
+            "angle_sampling": "stratified",
         },
         "dual_drills": drills.default_dual_config(),
         "sensitivity": {
@@ -204,6 +206,8 @@ def _default_config():
             "stability_k": 0.5,
         },
         "confirm_rounds": 10,
+        "focus_bins": "",
+        "focus_rounds": 3,
     }
 
 
@@ -279,6 +283,8 @@ class App(tk.Tk):
             ai_cfg = {}
         self.ai_preset_var = tk.StringVar(value=str(ai_cfg.get("preset", "Custom")))
         self.confirm_rounds_var = tk.IntVar(value=int(self.cfg.get("confirm_rounds", 10)))
+        self.focus_bins_var = tk.StringVar(value=str(self.cfg.get("focus_bins", "")))
+        self.focus_rounds_var = tk.IntVar(value=int(self.cfg.get("focus_rounds", 3)))
 
         self.status_var = tk.StringVar(value="Idle")
         self.best_var = tk.StringVar(value="")
@@ -291,6 +297,7 @@ class App(tk.Tk):
         self._curve_canvas = None
         self._last_best = None
         self._last_second = None
+        self._last_run_dir = None
 
         self._build_ui()
         self.after(100, self._first_run_prompt)
@@ -390,6 +397,13 @@ class App(tk.Tk):
         tk.Entry(frm_actions, width=6, textvariable=self.confirm_rounds_var).grid(row=1, column=4, sticky="w", **pad)
         tk.Button(frm_actions, text="Confirm best vs #2", command=self._start_confirm_best_vs_second).grid(row=1, column=5, sticky="w", **pad)
 
+        tk.Label(frm_actions, text="Focus bins").grid(row=2, column=0, sticky="w", **pad)
+        tk.Entry(frm_actions, width=18, textvariable=self.focus_bins_var).grid(row=2, column=1, sticky="w", **pad)
+        tk.Label(frm_actions, text="Focus rounds").grid(row=2, column=2, sticky="w", **pad)
+        tk.Entry(frm_actions, width=6, textvariable=self.focus_rounds_var).grid(row=2, column=3, sticky="w", **pad)
+        tk.Button(frm_actions, text="Use worst bins", command=self._focus_use_worst_bins).grid(row=2, column=4, sticky="w", **pad)
+        tk.Button(frm_actions, text="Run focus drill", command=self._start_focus_drill).grid(row=2, column=5, sticky="w", **pad)
+
         frm_status = tk.LabelFrame(self, text="Status")
         frm_status.grid(row=6, column=0, sticky="ew", **pad)
 
@@ -461,6 +475,8 @@ class App(tk.Tk):
             self.cfg["ai"]["preset"] = str(self.ai_preset_var.get())
 
         self.cfg["confirm_rounds"] = int(self.confirm_rounds_var.get())
+        self.cfg["focus_bins"] = str(self.focus_bins_var.get())
+        self.cfg["focus_rounds"] = int(self.focus_rounds_var.get())
         self.cfg["search"]["bounds"] = {
             "syncSpeed": [float(self.sync_min.get()), float(self.sync_max.get())],
             "motivity": [float(self.mot_min.get()), float(self.mot_max.get())],
@@ -513,6 +529,8 @@ class App(tk.Tk):
             timeout_ms=int(cfg.get("timeout_ms", 0)),
             start_gate=bool(cfg.get("start_gate", False)),
             dir_bins=int(cfg.get("dir_bins", 16)),
+            angle_sampling=str(cfg.get("angle_sampling", self.cfg.get("task", {}).get("angle_sampling", "stratified"))),
+            angle_filter_bins=cfg.get("angle_filter_bins"),
         )
         if result is not None and progress_hook is not None:
             try:
@@ -521,7 +539,7 @@ class App(tk.Tk):
                 pass
         return result
 
-    def _eval_drills(self, seed, baseline=None, progress_hook=None):
+    def _eval_drills(self, seed, baseline=None, progress_hook=None, angle_filter_bins=None, angle_sampling=None):
         penalty = float(self.cfg["task"]["penalty"])
 
         dual_cfg = self.cfg.get("dual_drills")
@@ -529,6 +547,17 @@ class App(tk.Tk):
             weights = drills.norm_weights(dual_cfg.get("weights", {}))
             micro_cfg = dual_cfg.get("micro") if isinstance(dual_cfg.get("micro"), dict) else drills.default_micro()
             flick_cfg = dual_cfg.get("flick") if isinstance(dual_cfg.get("flick"), dict) else drills.default_flick()
+
+            if angle_filter_bins is not None:
+                micro_cfg = dict(micro_cfg)
+                micro_cfg["angle_filter_bins"] = list(angle_filter_bins)
+                flick_cfg = dict(flick_cfg)
+                flick_cfg["angle_filter_bins"] = list(angle_filter_bins)
+            if angle_sampling is not None:
+                micro_cfg = dict(micro_cfg)
+                micro_cfg["angle_sampling"] = str(angle_sampling)
+                flick_cfg = dict(flick_cfg)
+                flick_cfg["angle_sampling"] = str(angle_sampling)
 
             micro_result = self._run_single_drill(micro_cfg, seed, progress_hook=progress_hook)
             if micro_result is None:
@@ -556,6 +585,12 @@ class App(tk.Tk):
             }
 
         task_cfg = self.cfg["task"]
+        if angle_filter_bins is not None:
+            task_cfg = dict(task_cfg)
+            task_cfg["angle_filter_bins"] = list(angle_filter_bins)
+        if angle_sampling is not None:
+            task_cfg = dict(task_cfg)
+            task_cfg["angle_sampling"] = str(angle_sampling)
         result = self._run_single_drill(task_cfg, seed, progress_hook=progress_hook)
         if result is None:
             return None
@@ -1563,6 +1598,261 @@ class App(tk.Tk):
         sess["round"] = r + 1
         self.after(50, self._confirm_step)
 
+    def _focus_use_worst_bins(self):
+        run_dir = self._last_run_dir
+        if run_dir is None:
+            RUNS_DIR.mkdir(parents=True, exist_ok=True)
+            picked = filedialog.askdirectory(title="Select run folder", initialdir=str(RUNS_DIR))
+            if not picked:
+                return
+            run_dir = pathlib.Path(picked)
+        else:
+            run_dir = pathlib.Path(run_dir)
+
+        csv_path = run_dir / "results.csv"
+        if not csv_path.exists():
+            messagebox.showerror("Missing", "results.csv not found in that folder")
+            return
+
+        try:
+            import csv as _csv
+
+            rows = []
+            with csv_path.open("r", encoding="utf-8") as f:
+                reader = _csv.DictReader(f)
+                for r in reader:
+                    rows.append(r)
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
+            return
+
+        best_row = None
+        best_val = float("-inf")
+        for r in rows:
+            tag = (r.get("tag") or "").strip()
+            if tag not in ("combined", "single"):
+                continue
+            v = r.get("metric_score")
+            if v is None or v == "":
+                v = r.get("score")
+            try:
+                x = float(v)
+            except Exception:
+                continue
+            if not math.isfinite(x):
+                continue
+            if x > best_val:
+                best_val = x
+                best_row = r
+
+        if best_row is None:
+            messagebox.showerror("Missing", "No scored rows found")
+            return
+
+        try:
+            it = int(float(best_row.get("iter") or best_row.get("idx") or 0))
+        except Exception:
+            it = 0
+
+        bins = []
+        for r in rows:
+            tag = (r.get("tag") or "").strip()
+            if tag not in ("micro", "flick", "single"):
+                continue
+            try:
+                it2 = int(float(r.get("iter") or r.get("idx") or 0))
+            except Exception:
+                continue
+            if it2 != it:
+                continue
+            wp = (r.get("weakness_path") or "").strip()
+            if not wp:
+                continue
+            try:
+                obj = json.loads((run_dir / wp).read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            ds = obj.get("dir_summary") if isinstance(obj, dict) else None
+            if not isinstance(ds, dict):
+                continue
+            for k in ("worst_miss", "worst_p90"):
+                xs = ds.get(k)
+                if not isinstance(xs, list):
+                    continue
+                for row in xs:
+                    if not isinstance(row, dict):
+                        continue
+                    try:
+                        bi = int(row.get("bin"))
+                    except Exception:
+                        continue
+                    bins.append(bi)
+
+        bins = sorted(set(bins))
+        if not bins:
+            messagebox.showerror("Missing", "No directional summary found in that run")
+            return
+
+        bins = bins[:8]
+        self.focus_bins_var.set(",".join(str(b) for b in bins))
+
+    def _start_focus_drill(self):
+        if self._session is not None:
+            messagebox.showinfo("Running", "A session is already running")
+            return
+        if not self._validate_ready():
+            return
+
+        raw = str(self.focus_bins_var.get() or "").strip()
+        if not raw:
+            messagebox.showerror("Missing", "Set Focus bins first (e.g. 0,1,2,3)")
+            return
+        bins = []
+        for part in raw.replace(" ", "").split(","):
+            if not part:
+                continue
+            try:
+                bins.append(int(part))
+            except Exception:
+                pass
+        bins = sorted(set(bins))
+        if not bins:
+            messagebox.showerror("Invalid", "Focus bins must be a comma-separated list of integers")
+            return
+
+        rounds = int(self.focus_rounds_var.get())
+        if rounds < 1:
+            messagebox.showerror("Invalid", "Focus rounds must be >= 1")
+            return
+
+        self._persist_ui_to_config()
+
+        RUNS_DIR.mkdir(parents=True, exist_ok=True)
+        run_id = time.strftime("%Y%m%d-%H%M%S")
+        run_dir = RUNS_DIR / f"focus_{run_id}"
+        run_dir.mkdir(parents=True, exist_ok=True)
+
+        controller = RawAccelController(
+            self.writer_var.get().strip(),
+            self.settings_var.get().strip(),
+            profile_index=int(self.cfg.get("profile_index", 0)),
+        )
+        try:
+            controller.snapshot_base(run_dir / "base_settings.json")
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
+            return
+
+        log_path = run_dir / "results.csv"
+        log_path.write_text(
+            "phase,iter,score,confidence,reason,tag,throughput,miss_rate,p90_error,pathEff,perpDev,overshoots,reaccels,timeToMoveMs,correctionMs,biasX,biasY,h_miss_rate,v_miss_rate,h_p90_error,v_p90_error,outputDpi,syncSpeed,motivity,gamma,smooth,yToXRatio,weakness_path,score_mean,score_std,metric_score,selection_metric,stability_k\n",
+            encoding="utf-8",
+        )
+
+        dual_cfg = self.cfg.get("dual_drills")
+        dual_enabled = isinstance(dual_cfg, dict) and bool(dual_cfg.get("enabled"))
+        runs_per_eval = 2 if dual_enabled else 1
+
+        self._stop_requested = False
+        self._session = {
+            "type": "focus",
+            "controller": controller,
+            "run_dir": run_dir,
+            "log_path": log_path,
+            "bins": list(bins),
+            "round": 0,
+            "rounds": int(rounds),
+            "seed_base": int(self.seed_var.get()) + 141000,
+            "current_run": 0,
+            "total_runs": int(rounds * runs_per_eval),
+        }
+
+        self.progress_var.set(f"0/{int(rounds * runs_per_eval)}")
+        self.status_var.set(f"Focus: starting ({rounds} rounds; bins {','.join(str(b) for b in bins)})")
+        self.after(50, self._focus_step)
+
+    def _focus_step(self):
+        sess = self._session
+        if not isinstance(sess, dict) or sess.get("type") != "focus":
+            return
+        if self._stop_requested:
+            self._finish("Stopped")
+            return
+
+        r = int(sess.get("round", 0))
+        rounds = int(sess.get("rounds", 0))
+        if r >= rounds:
+            self._finish("Done")
+            return
+
+        bins = sess.get("bins")
+        if not isinstance(bins, list) or not bins:
+            self._finish("Done")
+            return
+
+        seed = int(sess.get("seed_base", 0)) + r * 100
+        self.status_var.set(f"Focus {r+1}/{rounds}: running")
+
+        ev = self._eval_drills(seed, progress_hook=self._progress_hook, angle_filter_bins=bins, angle_sampling="stratified")
+        if ev is None:
+            self._stop_requested = True
+            self._finish("Stopped")
+            return
+
+        def write_row(tag, result, score):
+            weakness_path = ""
+            if isinstance(result, dict) and (isinstance(result.get("dir_bins"), dict) or isinstance(result.get("dir_summary"), dict)):
+                weakness_path = f"weakness_focus_{r+1:02d}_{tag}.json"
+                try:
+                    (pathlib.Path(sess["run_dir"]) / weakness_path).write_text(
+                        json.dumps(
+                            {
+                                "tag": str(tag),
+                                "round": int(r + 1),
+                                "dir_bins": result.get("dir_bins"),
+                                "dir_summary": result.get("dir_summary"),
+                            },
+                            ensure_ascii=False,
+                        ),
+                        encoding="utf-8",
+                    )
+                except Exception:
+                    weakness_path = ""
+
+            curve = self._read_current_curve(self.settings_var.get().strip()) or {}
+            yxr = self._read_current_y_to_x_ratio(self.settings_var.get().strip())
+            if yxr is None:
+                yxr = 1.0
+            dpi = self._read_current_output_dpi(self.settings_var.get().strip())
+            if dpi is None:
+                dpi = 0.0
+
+            with open(sess["log_path"], "a", encoding="utf-8") as f:
+                f.write(
+                    f"focus,{r+1},{float(score):.6f},0.000,{json.dumps('focus')},{tag},"
+                    f"{float(result.get('throughput', 0.0)):.6f},{float(result.get('miss_rate', 1.0)):.6f},{float(result.get('p90_error_px', result.get('avg_error_px', 0.0))):.6f},"
+                    f"{float(result.get('avg_path_eff', 0.0)):.6f},{float(result.get('avg_perp_dev', 0.0)):.6f},{float(result.get('avg_overshoots', 0.0)):.6f},{float(result.get('avg_reaccels', 0.0)):.6f},"
+                    f"{float(result.get('avg_time_to_move_ms', 0.0)):.6f},{float(result.get('avg_correction_ms', 0.0)):.6f},"
+                    f"{float(result.get('avg_bias_x', 0.0)):.6f},{float(result.get('avg_bias_y', 0.0)):.6f},"
+                    f"{float(result.get('h_miss_rate', 1.0)):.6f},{float(result.get('v_miss_rate', 1.0)):.6f},"
+                    f"{float(result.get('h_p90_error_px', 0.0)):.6f},{float(result.get('v_p90_error_px', 0.0)):.6f},"
+                    f"{float(dpi):.3f},{float(curve.get('syncSpeed', 0.0)):.6f},{float(curve.get('motivity', 0.0)):.6f},{float(curve.get('gamma', 0.0)):.6f},{float(curve.get('smooth', 0.0)):.6f},{float(yxr):.6f},{weakness_path},0,0,{float(score):.6f},focus,0.0\n"
+                )
+
+        if "single" in ev and isinstance(ev.get("single"), dict):
+            write_row("single", ev["single"], float(ev.get("combined_score", float("-inf"))))
+        else:
+            if isinstance(ev.get("micro"), dict):
+                write_row("micro", ev["micro"], float(ev.get("micro_score", 0.0)))
+            if isinstance(ev.get("flick"), dict):
+                write_row("flick", ev["flick"], float(ev.get("flick_score", 0.0)))
+
+            comb = {"throughput": 0.0, "miss_rate": 0.0}
+            write_row("combined", comb, float(ev.get("combined_score", float("-inf"))))
+
+        sess["round"] = int(sess.get("round", 0)) + 1
+        self.after(50, self._focus_step)
+
     def _save_best(self):
         if self._session is not None:
             messagebox.showinfo("Running", "Session is running")
@@ -1610,6 +1900,8 @@ class App(tk.Tk):
     def _finish(self, msg):
         sess = self._session
         if isinstance(sess, dict):
+            if sess.get("run_dir") is not None:
+                self._last_run_dir = sess.get("run_dir")
             if sess.get("type") == "ai":
                 self._save_ai_state(sess=sess, finished=msg)
                 if isinstance(sess.get("second"), dict):

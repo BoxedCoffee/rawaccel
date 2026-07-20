@@ -248,6 +248,13 @@ def run_task_block(root, trials, distances_px, radii_px, seed=None, timeout_ms=N
                     group_hits = [a for a in group if a.get("hit")]
                     miss_rate_i = 1.0 - (len(group_hits) / float(len(group))) if group else 1.0
 
+                    bp = [float(a.get("bias_parallel", 0.0)) for a in group]
+                    bperp = [float(a.get("bias_perp", 0.0)) for a in group]
+                    spd = [float(a.get("speed_px_s", 0.0)) for a in group]
+                    bias_parallel_mean = (sum(bp) / float(len(bp))) if bp else 0.0
+                    bias_perp_mean = (sum(bperp) / float(len(bperp))) if bperp else 0.0
+                    speed_mean = (sum(spd) / float(len(spd))) if spd else 0.0
+
                     correction_ms = [float(a.get("correction_time")) * 1000.0 for a in group_hits if a.get("correction_time") is not None]
                     move_ms = [float(a.get("time_to_move")) * 1000.0 for a in group_hits if a.get("time_to_move") is not None]
 
@@ -258,6 +265,9 @@ def run_task_block(root, trials, distances_px, radii_px, seed=None, timeout_ms=N
                     miss_rate_i = 1.0
                     avg_correction_ms = 0.0
                     avg_time_to_move_ms = 0.0
+                    bias_parallel_mean = 0.0
+                    bias_perp_mean = 0.0
+                    speed_mean = 0.0
 
                 deg0 = float(i) * bin_w
                 deg1 = float(i + 1) * bin_w
@@ -271,6 +281,9 @@ def run_task_block(root, trials, distances_px, radii_px, seed=None, timeout_ms=N
                         "p90_error_px": float(pct(group_errors, 0.9)),
                         "avg_correction_ms": float(avg_correction_ms),
                         "avg_time_to_move_ms": float(avg_time_to_move_ms),
+                        "bias_parallel_mean": float(bias_parallel_mean),
+                        "bias_perp_mean": float(bias_perp_mean),
+                        "speed_mean": float(speed_mean),
                     }
                 )
 

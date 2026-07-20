@@ -5,6 +5,8 @@ def default_micro():
         "start_gate": True,
         "distances_px": [80, 120, 160],
         "radii_px": [8, 10, 12],
+        "dir_bins": 16,
+        "angle_sampling": "stratified",
     }
 
 
@@ -15,6 +17,8 @@ def default_flick():
         "start_gate": True,
         "distances_px": [220, 340, 520],
         "radii_px": [12, 16, 22],
+        "dir_bins": 16,
+        "angle_sampling": "stratified",
     }
 
 

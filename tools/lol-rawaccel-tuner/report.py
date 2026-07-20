@@ -224,6 +224,8 @@ def write_report(csv_path, out_path=None, title="Run report"):
                     n = int(row.get("n", 0) or 0)
                     miss = float(row.get("miss_rate", 0.0) or 0.0)
                     p90 = float(row.get("p90_error_px", 0.0) or 0.0)
+                    bpar = float(row.get("bias_parallel_mean", 0.0) or 0.0)
+                    bperp = float(row.get("bias_perp_mean", 0.0) or 0.0)
                     corr = float(row.get("avg_correction_ms", 0.0) or 0.0)
                     alpha = max(0.0, min(0.75, miss))
                     bar = f"<div style='height:10px;width:{max(0.0,min(1.0,miss))*100:.0f}%;background:rgba(239,68,68,{alpha:.3f});border-radius:5px'></div>"
@@ -233,6 +235,8 @@ def write_report(csv_path, out_path=None, title="Run report"):
                         + td(n, align="right")
                         + td(f"{miss:.3f}", align="right")
                         + td(f"{p90:.1f}", align="right")
+                        + td(f"{bpar:+.1f}", align="right")
+                        + td(f"{bperp:+.1f}", align="right")
                         + td(f"{corr:.0f}", align="right")
                         + f"<td style='width:160px'>{bar}</td>"
                         + "</tr>"
@@ -242,7 +246,7 @@ def write_report(csv_path, out_path=None, title="Run report"):
                     "<div class='card' style='flex:1'>"
                     f"<h3>{html.escape(label)} ({bins} bins)</h3>"
                     "<table>"
-                    "<thead><tr><th>dir</th><th style='text-align:right'>n</th><th style='text-align:right'>miss</th><th style='text-align:right'>p90(px)</th><th style='text-align:right'>corr(ms)</th><th></th></tr></thead>"
+                    "<thead><tr><th>dir</th><th style='text-align:right'>n</th><th style='text-align:right'>miss</th><th style='text-align:right'>p90(px)</th><th style='text-align:right'>b‖</th><th style='text-align:right'>b⊥</th><th style='text-align:right'>corr(ms)</th><th></th></tr></thead>"
                     f"<tbody>{''.join(trows)}</tbody>"
                     "</table>"
                     "</div>"
