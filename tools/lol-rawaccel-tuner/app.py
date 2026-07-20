@@ -4,11 +4,13 @@ import os
 import pathlib
 import random
 import subprocess
+import threading
 import time
 import tkinter as tk
 from tkinter import filedialog, messagebox
 import statistics
 
+import ai_tuner
 from optimizer import CemTuner
 from rawaccel import RawAccelController
 from task import run_task_block
@@ -19,6 +21,33 @@ import report
 APP_DIR = pathlib.Path(__file__).resolve().parent
 CONFIG_PATH = APP_DIR / "config.json"
 RUNS_DIR = APP_DIR / "runs"
+AI_STATE_FILE = "ai_state.json"
+
+
+def _load_dotenv(path):
+    try:
+        text = pathlib.Path(path).read_text(encoding="utf-8")
+    except Exception:
+        return
+
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export ") :].lstrip()
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if not key:
+            continue
+        if key not in os.environ:
+            os.environ[key] = value
+
+
+_load_dotenv(APP_DIR / ".env")
 
 
 def _default_config():
@@ -33,6 +62,8 @@ def _default_config():
             "start_gate": True,
             "distances_px": [140, 240, 360],
             "radii_px": [10, 14, 20],
+            "dir_bins": 16,
+            "angle_sampling": "stratified",
         },
         "dual_drills": drills.default_dual_config(),
         "sensitivity": {
@@ -54,13 +85,131 @@ def _default_config():
                 "smooth": [0.2, 0.8],
             },
         },
+        "axis": {
+            "bounds": {
+                "yToXRatio": [0.85, 1.25],
+            }
+        },
         "ai": {
             "enabled": True,
+            "preset": "Custom",
+            "presets": {
+                "Custom": {},
+                "Wide tune": {
+                    "max_iters": 40,
+                    "confidence_threshold": 0.92,
+                    "history_limit": 16,
+                    "temperature": 0.25,
+                    "baseline_recheck_every": 10,
+                    "baseline_drop_ratio": 0.85,
+                    "confirm_repeats": 3,
+                    "confirm_win_rate": 0.67,
+                    "min_step_frac": 0.10,
+                    "max_step_frac": 0.45,
+                    "start_step_frac": 0.30,
+                    "eval_repeats": 2,
+                    "eval_repeats_min": 1,
+                    "repeat_gate_ratio": 0.05,
+                    "axis_iters": 8,
+                    "max_no_improve": 16,
+                    "final_confirm_repeats": 6,
+                    "plateau_stop": True,
+                    "selection_metric": "median",
+                    "stability_k": 0.5,
+                },
+                "Fine tune": {
+                    "max_iters": 22,
+                    "confidence_threshold": 0.88,
+                    "history_limit": 14,
+                    "temperature": 0.15,
+                    "baseline_recheck_every": 8,
+                    "baseline_drop_ratio": 0.85,
+                    "confirm_repeats": 2,
+                    "confirm_win_rate": 0.60,
+                    "min_step_frac": 0.05,
+                    "max_step_frac": 0.25,
+                    "start_step_frac": 0.14,
+                    "eval_repeats": 2,
+                    "eval_repeats_min": 1,
+                    "repeat_gate_ratio": 0.05,
+                    "axis_iters": 6,
+                    "max_no_improve": 12,
+                    "final_confirm_repeats": 4,
+                    "plateau_stop": True,
+                    "selection_metric": "median",
+                    "stability_k": 0.5,
+                },
+                "Balanced": {
+                    "max_iters": 60,
+                    "confidence_threshold": 0.94,
+                    "history_limit": 30,
+                    "temperature": 0.2,
+                    "baseline_recheck_every": 12,
+                    "baseline_drop_ratio": 0.83,
+                    "confirm_repeats": 4,
+                    "confirm_win_rate": 0.67,
+                    "min_step_frac": 0.07,
+                    "max_step_frac": 0.45,
+                    "start_step_frac": 0.26,
+                    "eval_repeats": 3,
+                    "eval_repeats_min": 1,
+                    "repeat_gate_ratio": 0.04,
+                    "axis_iters": 10,
+                    "max_no_improve": 24,
+                    "final_confirm_repeats": 8,
+                    "plateau_stop": True,
+                    "selection_metric": "stable",
+                    "stability_k": 0.5,
+                },
+                "Marathon": {
+                    "max_iters": 120,
+                    "confidence_threshold": 0.97,
+                    "history_limit": 50,
+                    "temperature": 0.2,
+                    "baseline_recheck_every": 12,
+                    "baseline_drop_ratio": 0.82,
+                    "confirm_repeats": 4,
+                    "confirm_win_rate": 0.70,
+                    "min_step_frac": 0.06,
+                    "max_step_frac": 0.50,
+                    "start_step_frac": 0.28,
+                    "eval_repeats": 3,
+                    "eval_repeats_min": 1,
+                    "repeat_gate_ratio": 0.04,
+                    "axis_iters": 14,
+                    "max_no_improve": 40,
+                    "final_confirm_repeats": 10,
+                    "plateau_stop": False,
+                    "selection_metric": "stable",
+                    "stability_k": 0.5,
+                },
+            },
             "max_iters": 18,
             "confidence_threshold": 0.85,
             "history_limit": 12,
             "temperature": 0.2,
+            "baseline_recheck_every": 8,
+            "baseline_drop_ratio": 0.85,
+            "confirm_repeats": 2,
+            "confirm_win_rate": 0.6,
+            "min_step_frac": 0.08,
+            "max_step_frac": 0.35,
+            "start_step_frac": 0.25,
+            "eval_repeats": 1,
+            "eval_repeats_min": 1,
+            "repeat_gate_ratio": 0.05,
+            "axis_iters": 0,
+            "max_no_improve": 6,
+            "final_confirm_repeats": 0,
+            "plateau_stop": True,
+            "selection_metric": "median",
+            "stability_k": 0.5,
         },
+        "confirm_rounds": 10,
+        "focus_bins": "",
+        "focus_rounds": 3,
+        "fix_rounds": 4,
+        "fix_mode": "Axis",
     }
 
 
@@ -131,15 +280,28 @@ class App(tk.Tk):
         self.seed_var = tk.IntVar(value=int(self.cfg["search"]["seed"]))
         self.repeats_var = tk.IntVar(value=int(self.cfg["search"].get("repeats", 2)))
 
+        ai_cfg = self.cfg.get("ai")
+        if not isinstance(ai_cfg, dict):
+            ai_cfg = {}
+        self.ai_preset_var = tk.StringVar(value=str(ai_cfg.get("preset", "Custom")))
+        self.confirm_rounds_var = tk.IntVar(value=int(self.cfg.get("confirm_rounds", 10)))
+        self.focus_bins_var = tk.StringVar(value=str(self.cfg.get("focus_bins", "")))
+        self.focus_rounds_var = tk.IntVar(value=int(self.cfg.get("focus_rounds", 3)))
+        self.fix_rounds_var = tk.IntVar(value=int(self.cfg.get("fix_rounds", 4)))
+        self.fix_mode_var = tk.StringVar(value=str(self.cfg.get("fix_mode", "Axis")))
+
         self.status_var = tk.StringVar(value="Idle")
         self.best_var = tk.StringVar(value="")
         self.progress_var = tk.StringVar(value="")
+        self.ai_var = tk.StringVar(value="")
 
         self._session = None
         self._stop_requested = False
 
         self._curve_canvas = None
         self._last_best = None
+        self._last_second = None
+        self._last_run_dir = None
 
         self._build_ui()
         self.after(100, self._first_run_prompt)
@@ -231,12 +393,34 @@ class App(tk.Tk):
         tk.Button(frm_actions, text="Restore base", command=self._restore_base).grid(row=0, column=8, **pad)
         tk.Button(frm_actions, text="Open runs", command=self._open_runs).grid(row=0, column=9, **pad)
 
+        tk.Label(frm_actions, text="AI preset").grid(row=1, column=0, sticky="w", **pad)
+        tk.OptionMenu(frm_actions, self.ai_preset_var, "Custom", "Wide tune", "Fine tune", "Balanced", "Marathon").grid(row=1, column=1, sticky="w", **pad)
+        tk.Button(frm_actions, text="Resume AI", command=self._resume_ai_tune).grid(row=1, column=2, sticky="w", **pad)
+
+        tk.Label(frm_actions, text="Confirm rounds").grid(row=1, column=3, sticky="w", **pad)
+        tk.Entry(frm_actions, width=6, textvariable=self.confirm_rounds_var).grid(row=1, column=4, sticky="w", **pad)
+        tk.Button(frm_actions, text="Confirm best vs #2", command=self._start_confirm_best_vs_second).grid(row=1, column=5, sticky="w", **pad)
+
+        tk.Label(frm_actions, text="Focus bins").grid(row=2, column=0, sticky="w", **pad)
+        tk.Entry(frm_actions, width=18, textvariable=self.focus_bins_var).grid(row=2, column=1, sticky="w", **pad)
+        tk.Label(frm_actions, text="Focus rounds").grid(row=2, column=2, sticky="w", **pad)
+        tk.Entry(frm_actions, width=6, textvariable=self.focus_rounds_var).grid(row=2, column=3, sticky="w", **pad)
+        tk.Button(frm_actions, text="Use worst bins", command=self._focus_use_worst_bins).grid(row=2, column=4, sticky="w", **pad)
+        tk.Button(frm_actions, text="Run focus drill", command=self._start_focus_drill).grid(row=2, column=5, sticky="w", **pad)
+
+        tk.Label(frm_actions, text="Fix rounds").grid(row=3, column=0, sticky="w", **pad)
+        tk.Entry(frm_actions, width=6, textvariable=self.fix_rounds_var).grid(row=3, column=1, sticky="w", **pad)
+        tk.Label(frm_actions, text="Fix mode").grid(row=3, column=2, sticky="w", **pad)
+        tk.OptionMenu(frm_actions, self.fix_mode_var, "Axis", "Curve").grid(row=3, column=3, sticky="w", **pad)
+        tk.Button(frm_actions, text="Fix weak bins", command=self._start_fix_weak_bins).grid(row=3, column=4, sticky="w", **pad)
+
         frm_status = tk.LabelFrame(self, text="Status")
         frm_status.grid(row=6, column=0, sticky="ew", **pad)
 
         tk.Label(frm_status, textvariable=self.status_var, width=92, anchor="w").grid(row=0, column=0, **pad)
         tk.Label(frm_status, textvariable=self.progress_var, width=92, anchor="w").grid(row=1, column=0, **pad)
         tk.Label(frm_status, textvariable=self.best_var, width=92, anchor="w").grid(row=2, column=0, **pad)
+        tk.Label(frm_status, textvariable=self.ai_var, width=92, anchor="w").grid(row=3, column=0, **pad)
 
         frm_curve = tk.LabelFrame(self, text="Curve preview (synchronous)")
         frm_curve.grid(row=7, column=0, sticky="ew", **pad)
@@ -295,6 +479,16 @@ class App(tk.Tk):
         self.cfg["search"]["generations"] = int(self.generations_var.get())
         self.cfg["search"]["seed"] = int(self.seed_var.get())
         self.cfg["search"]["repeats"] = int(self.repeats_var.get())
+
+        self.cfg.setdefault("ai", {})
+        if isinstance(self.cfg.get("ai"), dict):
+            self.cfg["ai"]["preset"] = str(self.ai_preset_var.get())
+
+        self.cfg["confirm_rounds"] = int(self.confirm_rounds_var.get())
+        self.cfg["focus_bins"] = str(self.focus_bins_var.get())
+        self.cfg["focus_rounds"] = int(self.focus_rounds_var.get())
+        self.cfg["fix_rounds"] = int(self.fix_rounds_var.get())
+        self.cfg["fix_mode"] = str(self.fix_mode_var.get())
         self.cfg["search"]["bounds"] = {
             "syncSpeed": [float(self.sync_min.get()), float(self.sync_max.get())],
             "motivity": [float(self.mot_min.get()), float(self.mot_max.get())],
@@ -346,6 +540,9 @@ class App(tk.Tk):
             seed=int(seed),
             timeout_ms=int(cfg.get("timeout_ms", 0)),
             start_gate=bool(cfg.get("start_gate", False)),
+            dir_bins=int(cfg.get("dir_bins", 16)),
+            angle_sampling=str(cfg.get("angle_sampling", self.cfg.get("task", {}).get("angle_sampling", "stratified"))),
+            angle_filter_bins=cfg.get("angle_filter_bins"),
         )
         if result is not None and progress_hook is not None:
             try:
@@ -354,7 +551,7 @@ class App(tk.Tk):
                 pass
         return result
 
-    def _eval_drills(self, seed, baseline=None, progress_hook=None):
+    def _eval_drills(self, seed, baseline=None, progress_hook=None, angle_filter_bins=None, angle_sampling=None):
         penalty = float(self.cfg["task"]["penalty"])
 
         dual_cfg = self.cfg.get("dual_drills")
@@ -362,6 +559,17 @@ class App(tk.Tk):
             weights = drills.norm_weights(dual_cfg.get("weights", {}))
             micro_cfg = dual_cfg.get("micro") if isinstance(dual_cfg.get("micro"), dict) else drills.default_micro()
             flick_cfg = dual_cfg.get("flick") if isinstance(dual_cfg.get("flick"), dict) else drills.default_flick()
+
+            if angle_filter_bins is not None:
+                micro_cfg = dict(micro_cfg)
+                micro_cfg["angle_filter_bins"] = list(angle_filter_bins)
+                flick_cfg = dict(flick_cfg)
+                flick_cfg["angle_filter_bins"] = list(angle_filter_bins)
+            if angle_sampling is not None:
+                micro_cfg = dict(micro_cfg)
+                micro_cfg["angle_sampling"] = str(angle_sampling)
+                flick_cfg = dict(flick_cfg)
+                flick_cfg["angle_sampling"] = str(angle_sampling)
 
             micro_result = self._run_single_drill(micro_cfg, seed, progress_hook=progress_hook)
             if micro_result is None:
@@ -389,6 +597,12 @@ class App(tk.Tk):
             }
 
         task_cfg = self.cfg["task"]
+        if angle_filter_bins is not None:
+            task_cfg = dict(task_cfg)
+            task_cfg["angle_filter_bins"] = list(angle_filter_bins)
+        if angle_sampling is not None:
+            task_cfg = dict(task_cfg)
+            task_cfg["angle_sampling"] = str(angle_sampling)
         result = self._run_single_drill(task_cfg, seed, progress_hook=progress_hook)
         if result is None:
             return None
@@ -746,6 +960,29 @@ class App(tk.Tk):
                 except Exception:
                     pass
         return out if out else None
+
+    def _read_current_y_to_x_ratio(self, settings_path):
+        try:
+            obj = json.loads(pathlib.Path(settings_path).read_text(encoding="utf-8"))
+        except Exception:
+            return None
+
+        profiles = obj.get("profiles")
+        if not isinstance(profiles, list) or not profiles:
+            return None
+        idx = int(self.cfg.get("profile_index", 0))
+        if idx < 0 or idx >= len(profiles):
+            idx = 0
+        prof = profiles[idx]
+        if not isinstance(prof, dict):
+            return None
+        v = prof.get("Y/X output DPI ratio (vertical sens multiplier)")
+        if v is None:
+            return None
+        try:
+            return float(v)
+        except Exception:
+            return None
 
     def _start_duel(self):
         if self._session is not None:
@@ -1110,8 +1347,914 @@ class App(tk.Tk):
         if not ok:
             messagebox.showwarning("Writer", "writer.exe reported an error")
             return
-        self.status_var.set("Best applied")
+
+        settings_path = pathlib.Path(self.settings_var.get().strip())
+        backup = None
+        try:
+            ts = time.strftime("%Y%m%d-%H%M%S")
+            backup = RUNS_DIR / f"settings_backup_{ts}.json"
+            backup.write_bytes(settings_path.read_bytes())
+        except Exception:
+            backup = None
+
+        try:
+            controller.write_candidate_settings(cand, settings_path)
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
+            return
+
+        ok2 = controller.apply_settings(settings_path)
+        if not ok2:
+            messagebox.showwarning("Writer", "writer.exe reported an error")
+            return
+
+        dpi_cur = self._read_current_output_dpi(str(settings_path))
+        curve_cur = self._read_current_curve(str(settings_path))
+        yxr_cur = self._read_current_y_to_x_ratio(str(settings_path))
+        ok_verify = True
+        if "outputDpi" in cand and dpi_cur is not None:
+            ok_verify = ok_verify and abs(float(dpi_cur) - float(cand["outputDpi"])) < 1e-6
+        if "yToXRatio" in cand and yxr_cur is not None:
+            ok_verify = ok_verify and abs(float(yxr_cur) - float(cand["yToXRatio"])) < 1e-6
+        if any(k in cand for k in ("syncSpeed", "motivity", "gamma", "smooth")) and curve_cur is not None:
+            for k in ("syncSpeed", "motivity", "gamma", "smooth"):
+                if k in cand and k in curve_cur:
+                    ok_verify = ok_verify and abs(float(curve_cur[k]) - float(cand[k])) < 1e-6
+
+        if backup is not None:
+            self.status_var.set(f"Best applied (saved; backup: {backup.name})")
+        else:
+            self.status_var.set("Best applied (saved)")
+        if not ok_verify:
+            messagebox.showwarning("Verify", "Applied, but settings.json did not match expected values")
         self._draw_curve(cand)
+
+    def _start_confirm_best_vs_second(self):
+        if self._session is not None:
+            messagebox.showinfo("Running", "A session is already running")
+            return
+        if not self._validate_ready():
+            return
+
+        best = None
+        second = None
+        if isinstance(self._last_best, dict):
+            best = dict(self._last_best)
+        if isinstance(self._last_second, dict):
+            second = dict(self._last_second)
+
+        if best is None or second is None:
+            messagebox.showerror("Missing", "Need an AI run with a runner-up (#2) to confirm")
+            return
+
+        rounds = int(self.confirm_rounds_var.get())
+        if rounds < 1:
+            messagebox.showerror("Invalid", "Confirm rounds must be >= 1")
+            return
+
+        self._persist_ui_to_config()
+
+        RUNS_DIR.mkdir(parents=True, exist_ok=True)
+        run_id = time.strftime("%Y%m%d-%H%M%S")
+        run_dir = RUNS_DIR / f"confirm_{run_id}"
+        run_dir.mkdir(parents=True, exist_ok=True)
+
+        controller = RawAccelController(
+            self.writer_var.get().strip(),
+            self.settings_var.get().strip(),
+            profile_index=int(self.cfg.get("profile_index", 0)),
+        )
+        try:
+            controller.snapshot_base(run_dir / "base_settings.json")
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
+            return
+
+        log_path = run_dir / "results.csv"
+        log_path.write_text(
+            "phase,iter,score,confidence,reason,tag,throughput,miss_rate,p90_error,pathEff,perpDev,overshoots,reaccels,timeToMoveMs,correctionMs,biasX,biasY,h_miss_rate,v_miss_rate,h_p90_error,v_p90_error,outputDpi,syncSpeed,motivity,gamma,smooth,yToXRatio,weakness_path,score_mean,score_std,metric_score,selection_metric,stability_k\n",
+            encoding="utf-8",
+        )
+
+        dual_cfg = self.cfg.get("dual_drills")
+        dual_enabled = isinstance(dual_cfg, dict) and bool(dual_cfg.get("enabled"))
+        runs_per_eval = 2 if dual_enabled else 1
+        total_runs = int(rounds * 2 * runs_per_eval)
+
+        self._stop_requested = False
+        self._session = {
+            "type": "confirm",
+            "controller": controller,
+            "run_dir": run_dir,
+            "log_path": log_path,
+            "best": dict(best),
+            "second": dict(second),
+            "rounds": int(rounds),
+            "round": 0,
+            "pairs": [],
+            "seed_base": int(self.seed_var.get()) + 121000,
+            "current_run": 0,
+            "total_runs": total_runs,
+        }
+
+        self.progress_var.set(f"0/{total_runs}")
+        self.status_var.set(f"Confirm: starting ({rounds} rounds)")
+        self.after(50, self._confirm_step)
+
+    def _confirm_step(self):
+        sess = self._session
+        if not isinstance(sess, dict) or sess.get("type") != "confirm":
+            return
+        if self._stop_requested:
+            self._finish("Stopped")
+            return
+
+        r = int(sess.get("round", 0))
+        rounds = int(sess.get("rounds", 0))
+        if r >= rounds:
+            pairs = sess.get("pairs")
+            if not isinstance(pairs, list) or not pairs:
+                self._finish("Done")
+                return
+
+            best_scores = [float(p.get("best", float("-inf"))) for p in pairs]
+            second_scores = [float(p.get("second", float("-inf"))) for p in pairs]
+            diffs = [b - s for b, s in zip(best_scores, second_scores)]
+
+            wins = sum(1 for d in diffs if d >= 0.0)
+            win_rate = wins / float(len(diffs)) if diffs else 0.0
+
+            best_mean = float(statistics.mean(best_scores))
+            second_mean = float(statistics.mean(second_scores))
+            best_std = float(statistics.pstdev(best_scores)) if len(best_scores) >= 2 else 0.0
+            second_std = float(statistics.pstdev(second_scores)) if len(second_scores) >= 2 else 0.0
+            diff_std = float(statistics.pstdev(diffs)) if len(diffs) >= 2 else 0.0
+            margin = max(0.5 * diff_std, 0.01 * abs(second_mean))
+
+            winner = "too_close"
+            if (best_mean - second_mean) >= margin and win_rate >= 0.6:
+                winner = "best"
+            if (second_mean - best_mean) >= margin and (1.0 - win_rate) >= 0.6:
+                winner = "second"
+
+            best_cand = dict(sess.get("best")) if isinstance(sess.get("best"), dict) else None
+            second_cand = dict(sess.get("second")) if isinstance(sess.get("second"), dict) else None
+
+            win_msg = "Too close to call"
+            out_best = best_cand
+            out_second = second_cand
+            if winner == "best":
+                win_msg = "Winner: BEST"
+            elif winner == "second":
+                win_msg = "Winner: #2 (runner-up)"
+                out_best = second_cand
+                out_second = best_cand
+
+            msg = (
+                f"{win_msg}\n\n"
+                f"Rounds: {len(pairs)}\n"
+                f"Win rate (BEST): {win_rate*100:.0f}%\n"
+                f"BEST mean±std: {best_mean:.4f} ± {best_std:.4f}\n"
+                f"#2 mean±std: {second_mean:.4f} ± {second_std:.4f}\n"
+                f"Mean diff (BEST-#2): {(best_mean-second_mean):+.4f} (margin {margin:.4f})"
+            )
+            messagebox.showinfo("Confirm", msg)
+
+            if isinstance(out_best, dict):
+                sess["best"] = dict(out_best)
+            if isinstance(out_second, dict):
+                sess["second"] = dict(out_second)
+            if isinstance(sess.get("best"), dict):
+                self._last_best = dict(sess.get("best"))
+            if isinstance(sess.get("second"), dict):
+                self._last_second = dict(sess.get("second"))
+
+            self._finish("Done")
+            return
+
+        seed = int(sess.get("seed_base", 0)) + r * 100
+        best = sess.get("best")
+        second = sess.get("second")
+        if not isinstance(best, dict) or not isinstance(second, dict):
+            self._finish("Done")
+            return
+
+        order = [
+            ("best", best),
+            ("second", second),
+        ]
+        if r % 2 == 1:
+            order = list(reversed(order))
+
+        scores = {"best": float("-inf"), "second": float("-inf")}
+        for side, cand_full in order:
+            if self._stop_requested:
+                self._finish("Stopped")
+                return
+
+            self._draw_curve(cand_full)
+            path = pathlib.Path(sess["run_dir"]) / f"confirm_{r+1:02d}_{side}.json"
+            sess["controller"].write_candidate_settings(cand_full, path)
+            sess["controller"].apply_settings(path)
+            self.status_var.set(f"Confirm {r+1}/{rounds} ({side})")
+
+            ev = self._eval_drills(seed, progress_hook=self._progress_hook)
+            if ev is None:
+                self._stop_requested = True
+                self._finish("Stopped")
+                return
+
+            weakness_path = ""
+            try:
+                out = {
+                    "side": str(side),
+                    "round": int(r + 1),
+                    "dir_bins": None,
+                    "dir_summary": None,
+                }
+                if "single" in ev and isinstance(ev.get("single"), dict):
+                    out["dir_bins"] = ev["single"].get("dir_bins")
+                    out["dir_summary"] = ev["single"].get("dir_summary")
+                else:
+                    out["dir_bins"] = {
+                        "micro": ev.get("micro", {}).get("dir_bins") if isinstance(ev.get("micro"), dict) else None,
+                        "flick": ev.get("flick", {}).get("dir_bins") if isinstance(ev.get("flick"), dict) else None,
+                    }
+                    out["dir_summary"] = {
+                        "micro": ev.get("micro", {}).get("dir_summary") if isinstance(ev.get("micro"), dict) else None,
+                        "flick": ev.get("flick", {}).get("dir_summary") if isinstance(ev.get("flick"), dict) else None,
+                    }
+
+                weakness_path = f"weakness_confirm_{r+1:02d}_{side}.json"
+                (pathlib.Path(sess["run_dir"]) / weakness_path).write_text(
+                    json.dumps(out, ensure_ascii=False),
+                    encoding="utf-8",
+                )
+            except Exception:
+                weakness_path = ""
+
+            sc = float(ev.get("combined_score", float("-inf")))
+            scores[side] = sc
+            with open(sess["log_path"], "a", encoding="utf-8") as f:
+                f.write(
+                    f"confirm,{r+1},{sc:.6f},0.000,{json.dumps('manual_confirm')},{side},"
+                    f"0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,"
+                    f"{float(cand_full.get('outputDpi', 0.0)):.3f},{float(cand_full.get('syncSpeed', 0.0)):.6f},{float(cand_full.get('motivity', 0.0)):.6f},{float(cand_full.get('gamma', 0.0)):.6f},{float(cand_full.get('smooth', 0.0)):.6f},{float(cand_full.get('yToXRatio', 1.0)):.6f},{weakness_path},0,0,{sc:.6f},confirm,0.0\n"
+                )
+
+        pairs = sess.get("pairs")
+        if not isinstance(pairs, list):
+            pairs = []
+            sess["pairs"] = pairs
+        pairs.append({"seed": seed, "best": scores["best"], "second": scores["second"]})
+        sess["round"] = r + 1
+        self.after(50, self._confirm_step)
+
+    def _focus_use_worst_bins(self):
+        run_dir = self._last_run_dir
+        if run_dir is None:
+            RUNS_DIR.mkdir(parents=True, exist_ok=True)
+            picked = filedialog.askdirectory(title="Select run folder", initialdir=str(RUNS_DIR))
+            if not picked:
+                return
+            run_dir = pathlib.Path(picked)
+        else:
+            run_dir = pathlib.Path(run_dir)
+
+        csv_path = run_dir / "results.csv"
+        if not csv_path.exists():
+            messagebox.showerror("Missing", "results.csv not found in that folder")
+            return
+
+        try:
+            import csv as _csv
+
+            rows = []
+            with csv_path.open("r", encoding="utf-8") as f:
+                reader = _csv.DictReader(f)
+                for r in reader:
+                    rows.append(r)
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
+            return
+
+        best_row = None
+        best_val = float("-inf")
+        for r in rows:
+            tag = (r.get("tag") or "").strip()
+            if tag not in ("combined", "single"):
+                continue
+            v = r.get("metric_score")
+            if v is None or v == "":
+                v = r.get("score")
+            try:
+                x = float(v)
+            except Exception:
+                continue
+            if not math.isfinite(x):
+                continue
+            if x > best_val:
+                best_val = x
+                best_row = r
+
+        if best_row is None:
+            messagebox.showerror("Missing", "No scored rows found")
+            return
+
+        try:
+            it = int(float(best_row.get("iter") or best_row.get("idx") or 0))
+        except Exception:
+            it = 0
+
+        bins = []
+        for r in rows:
+            tag = (r.get("tag") or "").strip()
+            if tag not in ("micro", "flick", "single"):
+                continue
+            try:
+                it2 = int(float(r.get("iter") or r.get("idx") or 0))
+            except Exception:
+                continue
+            if it2 != it:
+                continue
+            wp = (r.get("weakness_path") or "").strip()
+            if not wp:
+                continue
+            try:
+                obj = json.loads((run_dir / wp).read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            ds = obj.get("dir_summary") if isinstance(obj, dict) else None
+            if not isinstance(ds, dict):
+                continue
+            for k in ("worst_miss", "worst_p90"):
+                xs = ds.get(k)
+                if not isinstance(xs, list):
+                    continue
+                for row in xs:
+                    if not isinstance(row, dict):
+                        continue
+                    try:
+                        bi = int(row.get("bin"))
+                    except Exception:
+                        continue
+                    bins.append(bi)
+
+        bins = sorted(set(bins))
+        if not bins:
+            messagebox.showerror("Missing", "No directional summary found in that run")
+            return
+
+        bins = bins[:8]
+        self.focus_bins_var.set(",".join(str(b) for b in bins))
+
+    def _start_focus_drill(self):
+        if self._session is not None:
+            messagebox.showinfo("Running", "A session is already running")
+            return
+        if not self._validate_ready():
+            return
+
+        raw = str(self.focus_bins_var.get() or "").strip()
+        if not raw:
+            messagebox.showerror("Missing", "Set Focus bins first (e.g. 0,1,2,3)")
+            return
+        bins = []
+        for part in raw.replace(" ", "").split(","):
+            if not part:
+                continue
+            try:
+                bins.append(int(part))
+            except Exception:
+                pass
+        bins = sorted(set(bins))
+        if not bins:
+            messagebox.showerror("Invalid", "Focus bins must be a comma-separated list of integers")
+            return
+
+        rounds = int(self.focus_rounds_var.get())
+        if rounds < 1:
+            messagebox.showerror("Invalid", "Focus rounds must be >= 1")
+            return
+
+        self._persist_ui_to_config()
+
+        RUNS_DIR.mkdir(parents=True, exist_ok=True)
+        run_id = time.strftime("%Y%m%d-%H%M%S")
+        run_dir = RUNS_DIR / f"focus_{run_id}"
+        run_dir.mkdir(parents=True, exist_ok=True)
+
+        controller = RawAccelController(
+            self.writer_var.get().strip(),
+            self.settings_var.get().strip(),
+            profile_index=int(self.cfg.get("profile_index", 0)),
+        )
+        try:
+            controller.snapshot_base(run_dir / "base_settings.json")
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
+            return
+
+        log_path = run_dir / "results.csv"
+        log_path.write_text(
+            "phase,iter,score,confidence,reason,tag,throughput,miss_rate,p90_error,pathEff,perpDev,overshoots,reaccels,timeToMoveMs,correctionMs,biasX,biasY,h_miss_rate,v_miss_rate,h_p90_error,v_p90_error,outputDpi,syncSpeed,motivity,gamma,smooth,yToXRatio,weakness_path,score_mean,score_std,metric_score,selection_metric,stability_k\n",
+            encoding="utf-8",
+        )
+
+        dual_cfg = self.cfg.get("dual_drills")
+        dual_enabled = isinstance(dual_cfg, dict) and bool(dual_cfg.get("enabled"))
+        runs_per_eval = 2 if dual_enabled else 1
+
+        self._stop_requested = False
+        self._session = {
+            "type": "focus",
+            "controller": controller,
+            "run_dir": run_dir,
+            "log_path": log_path,
+            "bins": list(bins),
+            "round": 0,
+            "rounds": int(rounds),
+            "seed_base": int(self.seed_var.get()) + 141000,
+            "current_run": 0,
+            "total_runs": int(rounds * runs_per_eval),
+        }
+
+        self.progress_var.set(f"0/{int(rounds * runs_per_eval)}")
+        self.status_var.set(f"Focus: starting ({rounds} rounds; bins {','.join(str(b) for b in bins)})")
+        self.after(50, self._focus_step)
+
+    def _start_fix_weak_bins(self):
+        if self._session is not None:
+            messagebox.showinfo("Running", "A session is already running")
+            return
+        if not self._validate_ready():
+            return
+
+        if not str(self.focus_bins_var.get() or "").strip():
+            self._focus_use_worst_bins()
+
+        bins = self._parse_bins(self.focus_bins_var.get())
+        if not bins:
+            messagebox.showerror("Missing", "Set Focus bins first (or use worst bins)")
+            return
+
+        rounds = int(self.fix_rounds_var.get())
+        if rounds < 1:
+            messagebox.showerror("Invalid", "Fix rounds must be >= 1")
+            return
+
+        self._persist_ui_to_config()
+
+        bounds = self._bounds_with_axis()
+        base_cand = self._current_candidate(bounds)
+        fixed_dpi = self._read_current_output_dpi(self.settings_var.get().strip())
+        if fixed_dpi is None:
+            fixed_dpi = 0.0
+        full_base = {"mode": "synchronous", "outputDpi": float(fixed_dpi), **dict(base_cand)}
+
+        RUNS_DIR.mkdir(parents=True, exist_ok=True)
+        run_id = time.strftime("%Y%m%d-%H%M%S")
+        run_dir = RUNS_DIR / f"fix_{run_id}"
+        run_dir.mkdir(parents=True, exist_ok=True)
+
+        controller = RawAccelController(
+            self.writer_var.get().strip(),
+            self.settings_var.get().strip(),
+            profile_index=int(self.cfg.get("profile_index", 0)),
+        )
+        try:
+            controller.snapshot_base(run_dir / "base_settings.json")
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
+            return
+
+        log_path = run_dir / "results.csv"
+        log_path.write_text(
+            "phase,iter,score,confidence,reason,tag,throughput,miss_rate,p90_error,pathEff,perpDev,overshoots,reaccels,timeToMoveMs,correctionMs,biasX,biasY,h_miss_rate,v_miss_rate,h_p90_error,v_p90_error,outputDpi,syncSpeed,motivity,gamma,smooth,yToXRatio,weakness_path,score_mean,score_std,metric_score,selection_metric,stability_k\n",
+            encoding="utf-8",
+        )
+
+        dual_cfg = self.cfg.get("dual_drills")
+        dual_enabled = isinstance(dual_cfg, dict) and bool(dual_cfg.get("enabled"))
+        runs_per_eval = 2 if dual_enabled else 1
+        total_runs = int(rounds * runs_per_eval * 2)
+
+        base_path = run_dir / "fix_baseline.json"
+        controller.write_candidate_settings(full_base, base_path)
+        controller.apply_settings(base_path)
+
+        self._stop_requested = False
+        self._session = {
+            "type": "fix",
+            "controller": controller,
+            "run_dir": run_dir,
+            "log_path": log_path,
+            "bounds": bounds,
+            "bins": list(bins),
+            "rounds": int(rounds),
+            "seed_base": int(self.seed_var.get()) + 161000,
+            "stage": "baseline",
+            "round": 0,
+            "baseline": dict(full_base),
+            "tweak": None,
+            "baseline_scores": [],
+            "tweak_scores": [],
+            "baseline_weak": [],
+            "tweak_weak": [],
+            "current_run": 0,
+            "total_runs": total_runs,
+        }
+
+        self.progress_var.set(f"0/{total_runs}")
+        self.status_var.set(f"Fix: baseline ({rounds} rounds)")
+        self.after(50, self._fix_step)
+
+    def _fix_step(self):
+        sess = self._session
+        if not isinstance(sess, dict) or sess.get("type") != "fix":
+            return
+        if self._stop_requested:
+            self._finish("Stopped")
+            return
+
+        stage = str(sess.get("stage", "baseline"))
+        r = int(sess.get("round", 0))
+        rounds = int(sess.get("rounds", 0))
+        if r >= rounds:
+            if stage == "baseline":
+                bounds = sess.get("bounds") if isinstance(sess.get("bounds"), dict) else self._bounds_with_axis()
+                base = sess.get("baseline") if isinstance(sess.get("baseline"), dict) else {}
+                base2 = {k: base.get(k) for k in ("syncSpeed", "motivity", "gamma", "smooth", "yToXRatio") if k in base}
+                base2 = ai_tuner.clamp_candidate(base2, bounds)
+
+                client = self._build_ai_client()
+                mode = str(self.fix_mode_var.get() or "Axis")
+                tweak = None
+                last_weak = sess.get("baseline_weak")[-1] if isinstance(sess.get("baseline_weak"), list) and sess.get("baseline_weak") else None
+                if client is not None and isinstance(last_weak, dict):
+                    try:
+                        notes = "Propose a small adjustment targeting the diagnosis."
+                        if mode == "Axis":
+                            notes = notes + " ONLY change yToXRatio; keep syncSpeed/motivity/gamma/smooth the same."
+                        state = {
+                            "mode": "synchronous",
+                            "bounds": bounds,
+                            "fixed": {"outputDpi": float(base.get("outputDpi", 0.0))},
+                            "diagnosis": {"focus": last_weak.get("dir_summary")},
+                            "history": [],
+                            "best": {"score": 0.0, "candidate": dict(base2)},
+                            "objective": {"goal": "maximize focus combined_score", "notes": notes},
+                            "limits": {"selection_metric": "median"},
+                        }
+                        msgs = ai_tuner.build_ai_messages(state)
+                        content = client.chat(msgs, temperature=0.2)
+                        parsed = ai_tuner.parse_ai_response(content)
+                        tweak = ai_tuner.clamp_candidate(parsed.get("candidate", {}), bounds)
+                        if mode == "Axis":
+                            for k in ("syncSpeed", "motivity", "gamma", "smooth"):
+                                if k in base2:
+                                    tweak[k] = float(base2[k])
+                    except Exception:
+                        tweak = None
+
+                if tweak is None:
+                    tweak = self._propose_fix_candidate(base2, bounds, last_weak or {}, mode)
+
+                full_tweak = {"mode": "synchronous", "outputDpi": float(base.get("outputDpi", 0.0)), **dict(tweak)}
+                sess["tweak"] = dict(full_tweak)
+
+                tweak_path = pathlib.Path(sess["run_dir"]) / "fix_tweak.json"
+                sess["controller"].write_candidate_settings(full_tweak, tweak_path)
+                sess["controller"].apply_settings(tweak_path)
+
+                sess["stage"] = "tweak"
+                sess["round"] = 0
+                self.status_var.set(f"Fix: tweak ({rounds} rounds)")
+                self.after(50, self._fix_step)
+                return
+
+            baseline_scores = [float(x) for x in (sess.get("baseline_scores") or [])]
+            tweak_scores = [float(x) for x in (sess.get("tweak_scores") or [])]
+            n = min(len(baseline_scores), len(tweak_scores))
+            baseline_scores = baseline_scores[:n]
+            tweak_scores = tweak_scores[:n]
+            if n:
+                diffs = [t - b for t, b in zip(tweak_scores, baseline_scores)]
+                wins = sum(1 for d in diffs if d >= 0)
+                win_rate = wins / float(len(diffs))
+                b_mean = float(statistics.mean(baseline_scores))
+                t_mean = float(statistics.mean(tweak_scores))
+                d_mean = float(t_mean - b_mean)
+                d_std = float(statistics.pstdev(diffs)) if len(diffs) >= 2 else 0.0
+                margin = max(0.5 * d_std, 0.01 * abs(b_mean))
+
+                winner = "Too close"
+                if d_mean >= margin and win_rate >= 0.6:
+                    winner = "Tweak"
+                if (-d_mean) >= margin and (1.0 - win_rate) >= 0.6:
+                    winner = "Baseline"
+
+                msg = (
+                    f"Winner: {winner}\n\n"
+                    f"Rounds: {n}\n"
+                    f"Win rate (tweak): {win_rate*100:.0f}%\n"
+                    f"Baseline mean: {b_mean:.4f}\n"
+                    f"Tweak mean: {t_mean:.4f}\n"
+                    f"Diff (tweak-baseline): {d_mean:+.4f} (margin {margin:.4f})"
+                )
+                messagebox.showinfo("Fix weak bins", msg)
+
+                if winner == "Tweak" and isinstance(sess.get("tweak"), dict):
+                    self._last_best = dict(sess["tweak"])
+                elif isinstance(sess.get("baseline"), dict):
+                    self._last_best = dict(sess["baseline"])
+
+            self._finish("Done")
+            return
+
+        bins = sess.get("bins")
+        if not isinstance(bins, list) or not bins:
+            self._finish("Done")
+            return
+
+        seed = int(sess.get("seed_base", 0)) + r * 100
+        label = "baseline" if stage == "baseline" else "tweak"
+        self.status_var.set(f"Fix: {label} {r+1}/{rounds}")
+
+        ev = self._eval_drills(seed, progress_hook=self._progress_hook, angle_filter_bins=bins, angle_sampling="stratified")
+        if ev is None:
+            self._stop_requested = True
+            self._finish("Stopped")
+            return
+
+        weakness_path = f"weakness_fix_{label}_{r+1:02d}.json"
+        weak_obj = {"stage": str(label), "round": int(r + 1), "dir_bins": None, "dir_summary": None}
+        if "single" in ev and isinstance(ev.get("single"), dict):
+            weak_obj["dir_bins"] = ev["single"].get("dir_bins")
+            weak_obj["dir_summary"] = ev["single"].get("dir_summary")
+        else:
+            weak_obj["dir_bins"] = {
+                "micro": ev.get("micro", {}).get("dir_bins") if isinstance(ev.get("micro"), dict) else None,
+                "flick": ev.get("flick", {}).get("dir_bins") if isinstance(ev.get("flick"), dict) else None,
+            }
+            weak_obj["dir_summary"] = {
+                "micro": ev.get("micro", {}).get("dir_summary") if isinstance(ev.get("micro"), dict) else None,
+                "flick": ev.get("flick", {}).get("dir_summary") if isinstance(ev.get("flick"), dict) else None,
+            }
+
+        try:
+            (pathlib.Path(sess["run_dir"]) / weakness_path).write_text(json.dumps(weak_obj, ensure_ascii=False), encoding="utf-8")
+        except Exception:
+            weakness_path = ""
+
+        score = float(ev.get("combined_score", float("-inf")))
+        if stage == "baseline":
+            sess.setdefault("baseline_scores", []).append(score)
+            sess.setdefault("baseline_weak", []).append(weak_obj)
+        else:
+            sess.setdefault("tweak_scores", []).append(score)
+            sess.setdefault("tweak_weak", []).append(weak_obj)
+
+        cand = sess.get("baseline") if stage == "baseline" else sess.get("tweak")
+        if not isinstance(cand, dict):
+            cand = {}
+
+        with open(sess["log_path"], "a", encoding="utf-8") as f:
+            f.write(
+                f"fix_{label},{r},{float(score):.6f},0.000,{json.dumps('fix')},combined,"
+                f"0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,"
+                f"{float(cand.get('outputDpi', 0.0)):.3f},{float(cand.get('syncSpeed', 0.0)):.6f},{float(cand.get('motivity', 0.0)):.6f},{float(cand.get('gamma', 0.0)):.6f},{float(cand.get('smooth', 0.0)):.6f},{float(cand.get('yToXRatio', 1.0)):.6f},{weakness_path},0,0,{float(score):.6f},fix,0.0\n"
+            )
+
+        sess["round"] = r + 1
+        self.after(50, self._fix_step)
+
+    def _parse_bins(self, raw):
+        raw = str(raw or "").strip()
+        if not raw:
+            return []
+        bins = []
+        for part in raw.replace(" ", "").split(","):
+            if not part:
+                continue
+            try:
+                bins.append(int(part))
+            except Exception:
+                pass
+        return sorted(set(bins))
+
+    def _bounds_with_axis(self):
+        bounds = dict(self.cfg.get("search", {}).get("bounds", {}))
+        axis_bounds = self.cfg.get("axis", {}).get("bounds", {})
+        if isinstance(axis_bounds, dict) and "yToXRatio" in axis_bounds:
+            bounds["yToXRatio"] = list(axis_bounds["yToXRatio"])
+        return bounds
+
+    def _current_candidate(self, bounds):
+        curve = self._read_current_curve(self.settings_var.get().strip())
+        if curve is None:
+            curve = {k: (float(v[0]) + float(v[1])) / 2.0 for k, v in bounds.items() if isinstance(v, (list, tuple)) and len(v) == 2}
+        yxr = self._read_current_y_to_x_ratio(self.settings_var.get().strip())
+        if yxr is None:
+            yxr = 1.0
+        curve = dict(curve)
+        curve["yToXRatio"] = float(yxr)
+        return ai_tuner.clamp_candidate(curve, bounds)
+
+    def _diag_votes(self, weakness_obj):
+        if not isinstance(weakness_obj, dict):
+            return {}
+        ds = weakness_obj.get("dir_summary") if isinstance(weakness_obj.get("dir_summary"), dict) else None
+        if not isinstance(ds, dict):
+            return {}
+
+        items = []
+        for k in ("worst_miss", "worst_p90"):
+            xs = ds.get(k)
+            if not isinstance(xs, list):
+                continue
+            for r in xs:
+                if isinstance(r, dict):
+                    items.append(r)
+        if not items:
+            return {}
+
+        uniq = {}
+        for r in items:
+            try:
+                b = int(r.get("bin"))
+            except Exception:
+                continue
+            if b not in uniq:
+                uniq[b] = r
+        items = list(uniq.values())
+        items.sort(key=lambda r: (float(r.get("miss_rate", 0.0)), float(r.get("p90_error_px", 0.0))), reverse=True)
+        items = items[:6]
+
+        sp33 = float(ds.get("speed_p33", 0.0) or 0.0)
+        sp66 = float(ds.get("speed_p66", 0.0) or 0.0)
+
+        vert_votes = 0
+        vert_bias = 0.0
+        overshoot_votes = 0
+        undershoot_votes = 0
+        high_over = 0
+        low_under = 0
+
+        for r in items:
+            deg = 0.5 * (float(r.get("deg0", 0.0) or 0.0) + float(r.get("deg1", 0.0) or 0.0))
+            rad = math.radians(float(deg))
+            vy = abs(math.sin(rad))
+            bpar = float(r.get("bias_parallel_mean", 0.0) or 0.0)
+            spd = float(r.get("speed_mean", 0.0) or 0.0)
+
+            if vy >= 0.85:
+                vert_votes += 1
+                vert_bias += bpar
+            if bpar >= 2.0:
+                overshoot_votes += 1
+            if bpar <= -2.0:
+                undershoot_votes += 1
+            if sp66 > 0 and spd >= sp66 and bpar >= 2.0:
+                high_over += 1
+            if sp33 > 0 and spd <= sp33 and bpar <= -2.0:
+                low_under += 1
+
+        return {
+            "speed_p33": sp33,
+            "speed_p66": sp66,
+            "vert_votes": int(vert_votes),
+            "vert_bias": float(vert_bias),
+            "overshoot_votes": int(overshoot_votes),
+            "undershoot_votes": int(undershoot_votes),
+            "high_over": int(high_over),
+            "low_under": int(low_under),
+        }
+
+    def _propose_fix_candidate(self, base, bounds, weakness_obj, mode):
+        base = dict(base)
+        mode = str(mode or "Axis").strip()
+        votes = self._diag_votes(weakness_obj)
+
+        if mode == "Axis":
+            if "yToXRatio" not in bounds:
+                return base
+            yxr = float(base.get("yToXRatio", 1.0))
+            d = 0.0
+            if int(votes.get("vert_votes", 0)) >= 2:
+                vb = float(votes.get("vert_bias", 0.0))
+                if vb > 2.0:
+                    d = -0.02
+                if vb < -2.0:
+                    d = 0.02
+            if d == 0.0:
+                if int(votes.get("high_over", 0)) >= 2:
+                    d = -0.01
+                elif int(votes.get("low_under", 0)) >= 2:
+                    d = 0.01
+
+            base["yToXRatio"] = float(yxr + d)
+            for k in ("syncSpeed", "motivity", "gamma", "smooth"):
+                if k in base:
+                    base[k] = float(base[k])
+            return ai_tuner.clamp_candidate(base, bounds)
+
+        if int(votes.get("high_over", 0)) >= 2:
+            if "motivity" in base:
+                base["motivity"] = float(base["motivity"]) * 0.96
+            if "gamma" in base:
+                base["gamma"] = float(base["gamma"]) * 0.96
+            if "smooth" in base:
+                base["smooth"] = float(base["smooth"]) + 0.05
+        elif int(votes.get("low_under", 0)) >= 2:
+            if "syncSpeed" in base:
+                base["syncSpeed"] = float(base["syncSpeed"]) * 1.08
+            if "smooth" in base:
+                base["smooth"] = float(base["smooth"]) + 0.03
+
+        return ai_tuner.clamp_candidate(base, bounds)
+
+    def _focus_step(self):
+        sess = self._session
+        if not isinstance(sess, dict) or sess.get("type") != "focus":
+            return
+        if self._stop_requested:
+            self._finish("Stopped")
+            return
+
+        r = int(sess.get("round", 0))
+        rounds = int(sess.get("rounds", 0))
+        if r >= rounds:
+            self._finish("Done")
+            return
+
+        bins = sess.get("bins")
+        if not isinstance(bins, list) or not bins:
+            self._finish("Done")
+            return
+
+        seed = int(sess.get("seed_base", 0)) + r * 100
+        self.status_var.set(f"Focus {r+1}/{rounds}: running")
+
+        ev = self._eval_drills(seed, progress_hook=self._progress_hook, angle_filter_bins=bins, angle_sampling="stratified")
+        if ev is None:
+            self._stop_requested = True
+            self._finish("Stopped")
+            return
+
+        def write_row(tag, result, score):
+            weakness_path = ""
+            if isinstance(result, dict) and (isinstance(result.get("dir_bins"), dict) or isinstance(result.get("dir_summary"), dict)):
+                weakness_path = f"weakness_focus_{r+1:02d}_{tag}.json"
+                try:
+                    (pathlib.Path(sess["run_dir"]) / weakness_path).write_text(
+                        json.dumps(
+                            {
+                                "tag": str(tag),
+                                "round": int(r + 1),
+                                "dir_bins": result.get("dir_bins"),
+                                "dir_summary": result.get("dir_summary"),
+                            },
+                            ensure_ascii=False,
+                        ),
+                        encoding="utf-8",
+                    )
+                except Exception:
+                    weakness_path = ""
+
+            curve = self._read_current_curve(self.settings_var.get().strip()) or {}
+            yxr = self._read_current_y_to_x_ratio(self.settings_var.get().strip())
+            if yxr is None:
+                yxr = 1.0
+            dpi = self._read_current_output_dpi(self.settings_var.get().strip())
+            if dpi is None:
+                dpi = 0.0
+
+            with open(sess["log_path"], "a", encoding="utf-8") as f:
+                f.write(
+                    f"focus,{r+1},{float(score):.6f},0.000,{json.dumps('focus')},{tag},"
+                    f"{float(result.get('throughput', 0.0)):.6f},{float(result.get('miss_rate', 1.0)):.6f},{float(result.get('p90_error_px', result.get('avg_error_px', 0.0))):.6f},"
+                    f"{float(result.get('avg_path_eff', 0.0)):.6f},{float(result.get('avg_perp_dev', 0.0)):.6f},{float(result.get('avg_overshoots', 0.0)):.6f},{float(result.get('avg_reaccels', 0.0)):.6f},"
+                    f"{float(result.get('avg_time_to_move_ms', 0.0)):.6f},{float(result.get('avg_correction_ms', 0.0)):.6f},"
+                    f"{float(result.get('avg_bias_x', 0.0)):.6f},{float(result.get('avg_bias_y', 0.0)):.6f},"
+                    f"{float(result.get('h_miss_rate', 1.0)):.6f},{float(result.get('v_miss_rate', 1.0)):.6f},"
+                    f"{float(result.get('h_p90_error_px', 0.0)):.6f},{float(result.get('v_p90_error_px', 0.0)):.6f},"
+                    f"{float(dpi):.3f},{float(curve.get('syncSpeed', 0.0)):.6f},{float(curve.get('motivity', 0.0)):.6f},{float(curve.get('gamma', 0.0)):.6f},{float(curve.get('smooth', 0.0)):.6f},{float(yxr):.6f},{weakness_path},0,0,{float(score):.6f},focus,0.0\n"
+                )
+
+        if "single" in ev and isinstance(ev.get("single"), dict):
+            write_row("single", ev["single"], float(ev.get("combined_score", float("-inf"))))
+        else:
+            if isinstance(ev.get("micro"), dict):
+                write_row("micro", ev["micro"], float(ev.get("micro_score", 0.0)))
+            if isinstance(ev.get("flick"), dict):
+                write_row("flick", ev["flick"], float(ev.get("flick_score", 0.0)))
+
+            comb = {"throughput": 0.0, "miss_rate": 0.0}
+            write_row("combined", comb, float(ev.get("combined_score", float("-inf"))))
+
+        sess["round"] = int(sess.get("round", 0)) + 1
+        self.after(50, self._focus_step)
 
     def _save_best(self):
         if self._session is not None:
@@ -1160,6 +2303,12 @@ class App(tk.Tk):
     def _finish(self, msg):
         sess = self._session
         if isinstance(sess, dict):
+            if sess.get("run_dir") is not None:
+                self._last_run_dir = sess.get("run_dir")
+            if sess.get("type") == "ai":
+                self._save_ai_state(sess=sess, finished=msg)
+                if isinstance(sess.get("second"), dict):
+                    self._last_second = dict(sess.get("second"))
             if isinstance(sess.get("best"), dict):
                 self._last_best = dict(sess["best"])
             elif sess.get("type") == "quick_sens" and sess.get("best") is not None:
@@ -1181,6 +2330,7 @@ class App(tk.Tk):
         else:
             self.status_var.set(msg)
         self.progress_var.set("")
+        self.ai_var.set("")
         self._session = None
 
     def _progress_hook(self):
@@ -1593,6 +2743,279 @@ class App(tk.Tk):
             out[k] = x
         return ai_tuner.clamp_candidate(out, bounds)
 
+    def _build_ai_client(self):
+        openai_cfg = ai_tuner.default_openai_compat_config()
+        azure_cfg = ai_tuner.default_azure_config()
+        if openai_cfg["api_base"] and openai_cfg["model"]:
+            return ai_tuner.OpenAICompatibleClient(
+                api_base=openai_cfg["api_base"],
+                api_key=openai_cfg["api_key"],
+                model=openai_cfg["model"],
+            )
+        if azure_cfg["endpoint"] and azure_cfg["api_key"] and azure_cfg["deployment"]:
+            return ai_tuner.AzureOpenAIClient(
+                endpoint=azure_cfg["endpoint"],
+                api_key=azure_cfg["api_key"],
+                deployment=azure_cfg["deployment"],
+                api_version=azure_cfg["api_version"],
+            )
+        return None
+
+    def _save_ai_state(self, sess=None, finished=None):
+        if sess is None:
+            sess = self._session
+        if not isinstance(sess, dict) or sess.get("type") != "ai":
+            return
+        run_dir = sess.get("run_dir")
+        if run_dir is None:
+            return
+        path = pathlib.Path(run_dir) / AI_STATE_FILE
+
+        def get_path(p):
+            if p is None:
+                return ""
+            return str(p)
+
+        def num(x):
+            try:
+                v = float(x)
+            except Exception:
+                return None
+            return v if math.isfinite(v) else None
+
+        state = {
+            "version": 1,
+            "type": "ai",
+            "saved_at": float(time.time()),
+            "finished": str(finished) if finished is not None else None,
+            "run_dir": str(run_dir),
+            "log_path": get_path(sess.get("log_path")),
+            "trace_path": get_path(sess.get("trace_path")),
+            "writer_path": str(self.writer_var.get().strip()),
+            "settings_path": str(self.settings_var.get().strip()),
+            "profile_index": int(self.cfg.get("profile_index", 0)),
+            "fixed_dpi": float(sess.get("fixed_dpi", 0.0)),
+            "seed_base": int(sess.get("seed_base", 0)),
+            "bounds": sess.get("bounds"),
+            "candidate": sess.get("candidate"),
+            "history": sess.get("history"),
+            "best": sess.get("best"),
+            "best_score": num(sess.get("best_score")),
+            "best_sig": sess.get("best_sig"),
+            "second": sess.get("second"),
+            "second_score": num(sess.get("second_score")),
+            "second_sig": sess.get("second_sig"),
+            "iter": int(sess.get("iter", 0)),
+            "max_iters": int(sess.get("max_iters", 0)),
+            "confidence_threshold": float(sess.get("confidence_threshold", 0.0)),
+            "history_limit": int(sess.get("history_limit", 0)),
+            "temperature": float(sess.get("temperature", 0.0)),
+            "no_improve": int(sess.get("no_improve", 0)),
+            "selection_metric": str(sess.get("selection_metric", "median")),
+            "stability_k": float(sess.get("stability_k", 0.5)),
+            "step_frac": float(sess.get("step_frac", 0.0)),
+            "min_step_frac": float(sess.get("min_step_frac", 0.0)),
+            "max_step_frac": float(sess.get("max_step_frac", 0.0)),
+            "noise_est": float(sess.get("noise_est", 0.0)),
+            "runs_per_eval": int(sess.get("runs_per_eval", 1)),
+            "eval_repeats": int(sess.get("eval_repeats", 1)),
+            "axis_iters": int(sess.get("axis_iters", 0)),
+            "max_no_improve": int(sess.get("max_no_improve", 6)),
+            "final_confirm_repeats": int(sess.get("final_confirm_repeats", 0)),
+            "plateau_stop": bool(sess.get("plateau_stop", True)),
+            "dual_enabled": bool(sess.get("dual_enabled", False)),
+            "baseline_candidate": sess.get("baseline_candidate"),
+            "baseline_score": num(sess.get("baseline_score")),
+            "baseline_checked_at": sess.get("baseline_checked_at"),
+            "baseline_recheck_every": int(sess.get("baseline_recheck_every", 0)),
+            "baseline_drop_ratio": float(sess.get("baseline_drop_ratio", 0.0)),
+            "confirm_repeats": int(sess.get("confirm_repeats", 0)),
+            "confirm_win_rate": float(sess.get("confirm_win_rate", 0.0)),
+            "confirm": sess.get("confirm"),
+            "current_run": int(sess.get("current_run", 0)),
+            "total_runs": int(sess.get("total_runs", 0)),
+        }
+
+        try:
+            path.write_text(json.dumps(state, indent=2), encoding="utf-8")
+        except Exception:
+            pass
+
+    def _load_ai_state(self, run_dir):
+        path = pathlib.Path(run_dir) / AI_STATE_FILE
+        if not path.exists():
+            return None
+        try:
+            obj = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+        if not isinstance(obj, dict) or obj.get("type") != "ai":
+            return None
+        return obj
+
+    def _resume_ai_tune(self):
+        if self._session is not None:
+            messagebox.showinfo("Running", "A session is already running")
+            return
+        if not self._validate_ready():
+            return
+
+        RUNS_DIR.mkdir(parents=True, exist_ok=True)
+        run_dir = filedialog.askdirectory(title="Select AI run folder", initialdir=str(RUNS_DIR))
+        if not run_dir:
+            return
+
+        state = self._load_ai_state(run_dir)
+        if not isinstance(state, dict):
+            messagebox.showerror("Missing", f"No {AI_STATE_FILE} found in that folder")
+            return
+
+        prev_writer = str(state.get("writer_path", ""))
+        prev_settings = str(state.get("settings_path", ""))
+        cur_writer = self.writer_var.get().strip()
+        cur_settings = self.settings_var.get().strip()
+        if prev_writer and cur_writer and pathlib.Path(prev_writer) != pathlib.Path(cur_writer):
+            messagebox.showwarning("Mismatch", "writer.exe differs from when this run started")
+        if prev_settings and cur_settings and pathlib.Path(prev_settings) != pathlib.Path(cur_settings):
+            messagebox.showwarning("Mismatch", "settings.json differs from when this run started")
+
+        client = self._build_ai_client()
+        if client is None:
+            messagebox.showerror(
+                "Missing",
+                "Set OPENAI_API_BASE + OPENAI_MODEL (+ optional OPENAI_API_KEY)\n"
+                "or AZURE_OPENAI_ENDPOINT + AZURE_OPENAI_API_KEY + AZURE_OPENAI_DEPLOYMENT.",
+            )
+            return
+
+        run_dir_p = pathlib.Path(run_dir)
+        base_path = run_dir_p / "base_settings.json"
+        if not base_path.exists():
+            messagebox.showwarning("Missing", "base_settings.json missing; snapshotting current settings")
+            try:
+                base_path.write_bytes(pathlib.Path(self.settings_var.get().strip()).read_bytes())
+            except Exception as e:
+                messagebox.showerror("Error", str(e))
+                return
+
+        controller = RawAccelController(
+            self.writer_var.get().strip(),
+            str(base_path),
+            profile_index=int(state.get("profile_index", int(self.cfg.get("profile_index", 0)))),
+        )
+        try:
+            controller.snapshot_base(base_path)
+        except Exception:
+            pass
+
+        bounds = state.get("bounds")
+        if not isinstance(bounds, dict):
+            bounds = self.cfg.get("search", {}).get("bounds", {})
+
+        fixed_dpi = state.get("fixed_dpi")
+        if fixed_dpi is None:
+            fixed_dpi = self._read_current_output_dpi(self.settings_var.get().strip())
+        if fixed_dpi is None:
+            messagebox.showerror("Missing", "Could not read Output DPI")
+            return
+
+        dual_cfg = self.cfg.get("dual_drills")
+        dual_enabled_now = isinstance(dual_cfg, dict) and bool(dual_cfg.get("enabled"))
+        dual_enabled_saved = bool(state.get("dual_enabled", dual_enabled_now))
+        if dual_enabled_now != dual_enabled_saved:
+            messagebox.showwarning("Mismatch", "Dual-drill setting differs from when this run started")
+
+        sess = {
+            "type": "ai",
+            "controller": controller,
+            "run_dir": run_dir_p,
+            "log_path": run_dir_p / "results.csv",
+            "trace_path": run_dir_p / "ai_trace.jsonl",
+            "client": client,
+            "bounds": bounds,
+            "fixed_dpi": float(fixed_dpi),
+            "seed_base": int(state.get("seed_base", int(self.seed_var.get()))),
+            "candidate": state.get("candidate") if isinstance(state.get("candidate"), dict) else None,
+            "history": state.get("history") if isinstance(state.get("history"), list) else [],
+            "best": state.get("best") if isinstance(state.get("best"), dict) else None,
+            "best_score": float(state["best_score"]) if state.get("best_score") is not None else float("-inf"),
+            "best_sig": state.get("best_sig"),
+            "second": state.get("second") if isinstance(state.get("second"), dict) else None,
+            "second_score": float(state["second_score"]) if state.get("second_score") is not None else float("-inf"),
+            "second_sig": state.get("second_sig"),
+            "iter": int(state.get("iter", 0)),
+            "max_iters": int(state.get("max_iters", 18)),
+            "confidence_threshold": float(state.get("confidence_threshold", 0.85)),
+            "history_limit": int(state.get("history_limit", 12)),
+            "temperature": float(state.get("temperature", 0.2)),
+            "no_improve": int(state.get("no_improve", 0)),
+            "step_frac": float(state.get("step_frac", 0.25)),
+            "min_step_frac": float(state.get("min_step_frac", 0.08)),
+            "max_step_frac": float(state.get("max_step_frac", 0.35)),
+            "noise_est": float(state.get("noise_est", 0.0)),
+            "runs_per_eval": int(state.get("runs_per_eval", 1)),
+            "eval_repeats": int(state.get("eval_repeats", 1)),
+            "eval_repeats_min": int(state.get("eval_repeats_min", 1)),
+            "repeat_gate_ratio": float(state.get("repeat_gate_ratio", 0.05)),
+            "axis_iters": int(state.get("axis_iters", 0)),
+            "max_no_improve": int(state.get("max_no_improve", 6)),
+            "final_confirm_repeats": int(state.get("final_confirm_repeats", 0)),
+            "plateau_stop": bool(state.get("plateau_stop", True)),
+            "selection_metric": str(state.get("selection_metric", "median") or "median"),
+            "stability_k": float(state.get("stability_k", 0.5)),
+            "dual_enabled": bool(dual_enabled_saved),
+            "baseline_candidate": state.get("baseline_candidate"),
+            "baseline_score": state.get("baseline_score"),
+            "baseline_checked_at": state.get("baseline_checked_at"),
+            "baseline_recheck_every": int(state.get("baseline_recheck_every", 8)),
+            "baseline_drop_ratio": float(state.get("baseline_drop_ratio", 0.85)),
+            "confirm_repeats": int(state.get("confirm_repeats", 2)),
+            "confirm_win_rate": float(state.get("confirm_win_rate", 0.6)),
+            "confirm": state.get("confirm"),
+            "ai_thread": None,
+            "ai_result": None,
+            "ai_error": None,
+            "current_run": int(state.get("current_run", 0)),
+            "total_runs": int(state.get("total_runs", 0)),
+        }
+
+        if not isinstance(sess.get("candidate"), dict):
+            messagebox.showerror("Missing", "Saved state is missing candidate")
+            return
+
+        self._stop_requested = False
+        self._session = sess
+        self.progress_var.set(f"{int(sess.get('current_run', 0))}/{int(sess.get('total_runs', 0))}")
+
+        it = int(sess.get("iter", 0))
+        max_iters = int(sess.get("max_iters", 0))
+        axis_total = int(sess.get("axis_iters", 0))
+        if axis_total > 0 and it < axis_total:
+            stage_label = f"Axis {it+1}/{axis_total}"
+        else:
+            curve_total = max(1, max_iters - axis_total) if axis_total > 0 else max(1, max_iters)
+            curve_idx = it - axis_total + 1 if axis_total > 0 else it + 1
+            stage_label = f"Curve {max(1, curve_idx)}/{curve_total}"
+
+        self.status_var.set(f"AI resumed: {stage_label} (iter {it+1}/{max_iters})")
+        self.ai_var.set("AI: resumed")
+
+        cur_best = sess.get("best")
+        if isinstance(cur_best, dict):
+            self.best_var.set(
+                f"Best {float(sess.get('best_score', 0.0)):.3f}: DPI={cur_best.get('outputDpi', 0.0):.1f} sync={cur_best.get('syncSpeed', 0.0):.3f} mot={cur_best.get('motivity', 0.0):.3f} g={cur_best.get('gamma', 0.0):.3f} s={cur_best.get('smooth', 0.0):.3f} yx={float(cur_best.get('yToXRatio', 1.0)):.3f}"
+            )
+        else:
+            self.best_var.set("")
+
+        cand = {"mode": "synchronous", "outputDpi": float(sess["fixed_dpi"]), **dict(sess["candidate"])}
+        self._draw_curve(cand)
+
+        if isinstance(sess.get("confirm"), dict):
+            self.after(50, self._ai_confirm_step)
+        else:
+            self.after(50, self._ai_eval_step)
+
     def _start_ai_tune(self):
         if self._session is not None:
             messagebox.showinfo("Running", "A session is already running")
@@ -1607,22 +3030,8 @@ class App(tk.Tk):
             messagebox.showerror("Missing", "Could not read 'Output DPI' from settings.json. Run Quick sens first or set it.")
             return
 
-        openai_cfg = ai_tuner.default_openai_compat_config()
-        azure_cfg = ai_tuner.default_azure_config()
-        if openai_cfg["api_base"] and openai_cfg["model"]:
-            client = ai_tuner.OpenAICompatibleClient(
-                api_base=openai_cfg["api_base"],
-                api_key=openai_cfg["api_key"],
-                model=openai_cfg["model"],
-            )
-        elif azure_cfg["endpoint"] and azure_cfg["api_key"] and azure_cfg["deployment"]:
-            client = ai_tuner.AzureOpenAIClient(
-                endpoint=azure_cfg["endpoint"],
-                api_key=azure_cfg["api_key"],
-                deployment=azure_cfg["deployment"],
-                api_version=azure_cfg["api_version"],
-            )
-        else:
+        client = self._build_ai_client()
+        if client is None:
             messagebox.showerror(
                 "Missing",
                 "Set OPENAI_API_BASE + OPENAI_MODEL (+ optional OPENAI_API_KEY)\n"
@@ -1630,20 +3039,55 @@ class App(tk.Tk):
             )
             return
 
-        bounds = self.cfg["search"]["bounds"]
+        bounds = dict(self.cfg["search"]["bounds"])
+        axis_bounds = self.cfg.get("axis", {}).get("bounds", {})
+        if isinstance(axis_bounds, dict) and "yToXRatio" in axis_bounds:
+            bounds["yToXRatio"] = list(axis_bounds["yToXRatio"])
         start_curve = self._read_current_curve(self.settings_var.get().strip())
         if start_curve is None:
             start_curve = {k: (float(v[0]) + float(v[1])) / 2.0 for k, v in bounds.items()}
 
-        max_iters = int(self.cfg.get("ai", {}).get("max_iters", 18))
-        conf_th = float(self.cfg.get("ai", {}).get("confidence_threshold", 0.85))
-        hist_lim = int(self.cfg.get("ai", {}).get("history_limit", 12))
-        temp = float(self.cfg.get("ai", {}).get("temperature", 0.2))
+        yxr = self._read_current_y_to_x_ratio(self.settings_var.get().strip())
+        if yxr is None:
+            yxr = 1.0
+        start_curve["yToXRatio"] = float(yxr)
+
+        ai_cfg0 = self.cfg.get("ai")
+        if not isinstance(ai_cfg0, dict):
+            ai_cfg0 = {}
+        preset = str(self.ai_preset_var.get() or ai_cfg0.get("preset") or "Custom")
+        presets = ai_cfg0.get("presets") if isinstance(ai_cfg0.get("presets"), dict) else {}
+        overrides = presets.get(preset) if isinstance(presets.get(preset), dict) else {}
+        ai_cfg = dict(ai_cfg0)
+        ai_cfg.update(dict(overrides))
+
+        max_iters = int(ai_cfg.get("max_iters", 18))
+        conf_th = float(ai_cfg.get("confidence_threshold", 0.85))
+        hist_lim = int(ai_cfg.get("history_limit", 12))
+        temp = float(ai_cfg.get("temperature", 0.2))
+        baseline_every = int(ai_cfg.get("baseline_recheck_every", 8))
+        baseline_drop_ratio = float(ai_cfg.get("baseline_drop_ratio", 0.85))
+        confirm_repeats = int(ai_cfg.get("confirm_repeats", 2))
+        confirm_win_rate = float(ai_cfg.get("confirm_win_rate", 0.6))
+        min_step_frac = float(ai_cfg.get("min_step_frac", 0.08))
+        max_step_frac = float(ai_cfg.get("max_step_frac", 0.35))
+        start_step_frac = float(ai_cfg.get("start_step_frac", 0.25))
+        eval_repeats = int(ai_cfg.get("eval_repeats", 1))
+        axis_iters = int(ai_cfg.get("axis_iters", 0))
+        max_no_improve = int(ai_cfg.get("max_no_improve", 6))
+        final_confirm_repeats = int(ai_cfg.get("final_confirm_repeats", 0))
+        plateau_stop = bool(ai_cfg.get("plateau_stop", True))
+        selection_metric = str(ai_cfg.get("selection_metric", "median") or "median").strip().lower()
+        if selection_metric not in ("median", "stable"):
+            selection_metric = "median"
+        stability_k = float(ai_cfg.get("stability_k", 0.5))
 
         dual_cfg = self.cfg.get("dual_drills")
         dual_enabled = isinstance(dual_cfg, dict) and bool(dual_cfg.get("enabled"))
         runs_per_eval = 2 if dual_enabled else 1
-        total_runs = int(max_iters * runs_per_eval)
+        total_runs = int(max_iters * runs_per_eval * max(1, eval_repeats))
+
+        seed_base = int(self.seed_var.get())
 
         RUNS_DIR.mkdir(parents=True, exist_ok=True)
         run_id = time.strftime("%Y%m%d-%H%M%S")
@@ -1663,7 +3107,7 @@ class App(tk.Tk):
 
         log_path = run_dir / "results.csv"
         log_path.write_text(
-            "phase,iter,score,confidence,reason,tag,throughput,miss_rate,p90_error,pathEff,perpDev,overshoots,reaccels,timeToMoveMs,correctionMs,biasX,biasY,outputDpi,syncSpeed,motivity,gamma,smooth\n",
+            "phase,iter,score,confidence,reason,tag,throughput,miss_rate,p90_error,pathEff,perpDev,overshoots,reaccels,timeToMoveMs,correctionMs,biasX,biasY,h_miss_rate,v_miss_rate,h_p90_error,v_p90_error,outputDpi,syncSpeed,motivity,gamma,smooth,yToXRatio,weakness_path\n",
             encoding="utf-8",
         )
 
@@ -1680,17 +3124,42 @@ class App(tk.Tk):
             "client": client,
             "bounds": bounds,
             "fixed_dpi": float(fixed_dpi),
+            "seed_base": int(seed_base),
             "candidate": ai_tuner.clamp_candidate(start_curve, bounds),
             "history": [],
             "best": None,
             "best_score": float("-inf"),
+            "best_sig": None,
+            "second": None,
+            "second_score": float("-inf"),
+            "second_sig": None,
             "iter": 0,
             "max_iters": max_iters,
             "confidence_threshold": conf_th,
             "history_limit": hist_lim,
             "temperature": temp,
             "no_improve": 0,
-            "step_frac": 0.25,
+            "step_frac": float(start_step_frac),
+            "min_step_frac": float(min_step_frac),
+            "max_step_frac": float(max_step_frac),
+            "noise_est": 0.0,
+            "runs_per_eval": int(runs_per_eval),
+            "eval_repeats": int(max(1, eval_repeats)),
+            "axis_iters": int(max(0, axis_iters)),
+            "max_no_improve": int(max(0, max_no_improve)),
+            "final_confirm_repeats": int(max(0, final_confirm_repeats)),
+            "plateau_stop": bool(plateau_stop),
+            "selection_metric": str(selection_metric),
+            "stability_k": float(stability_k),
+            "dual_enabled": bool(dual_enabled),
+            "baseline_candidate": None,
+            "baseline_score": None,
+            "baseline_checked_at": None,
+            "baseline_recheck_every": int(baseline_every),
+            "baseline_drop_ratio": float(baseline_drop_ratio),
+            "confirm_repeats": int(confirm_repeats),
+            "confirm_win_rate": float(confirm_win_rate),
+            "confirm": None,
             "ai_thread": None,
             "ai_result": None,
             "ai_error": None,
@@ -1699,8 +3168,11 @@ class App(tk.Tk):
         }
 
         self.progress_var.set(f"0/{total_runs}")
-        self.status_var.set("AI tune: starting")
+        self.status_var.set(f"AI tune: starting ({preset})")
         self.best_var.set("")
+        self.ai_var.set("")
+
+        self._save_ai_state()
 
         self.after(50, self._ai_eval_step)
 
@@ -1714,9 +3186,56 @@ class App(tk.Tk):
 
         it = int(sess["iter"])
         if it >= int(sess["max_iters"]):
+            if self._ai_start_final_confirm("max_iters"):
+                return
             self._last_best = dict(sess["best"]) if isinstance(sess.get("best"), dict) else None
             self._finish("Done")
             return
+
+        baseline_every = int(sess.get("baseline_recheck_every", 0))
+        baseline_cand = sess.get("baseline_candidate")
+        baseline_score0 = sess.get("baseline_score")
+        if (
+            baseline_every > 0
+            and it > 0
+            and baseline_cand is not None
+            and baseline_score0 is not None
+            and it % baseline_every == 0
+            and sess.get("baseline_checked_at") != it
+        ):
+            sess["baseline_checked_at"] = it
+            self._ai_bump_total_runs(int(sess.get("runs_per_eval", 1)))
+
+            full0 = {"mode": "synchronous", "outputDpi": float(sess["fixed_dpi"]), **dict(baseline_cand)}
+            self._draw_curve(full0)
+            path0 = pathlib.Path(sess["run_dir"]) / f"baseline_{it:03d}.json"
+            sess["controller"].write_candidate_settings(full0, path0)
+            sess["controller"].apply_settings(path0)
+
+            seed0 = int(sess.get("seed_base", 0)) + 61000 + it
+            ev0 = self._eval_drills(seed0, progress_hook=self._progress_hook)
+            if ev0 is None:
+                self._stop_requested = True
+                self._finish("Stopped")
+                return
+            score0 = float(ev0.get("combined_score", float("-inf")))
+            ratio = (score0 / float(baseline_score0)) if float(baseline_score0) != 0 else 1.0
+            with open(sess["log_path"], "a", encoding="utf-8") as f:
+                    f.write(
+                    f"baseline,{it},{float(score0):.6f},0.000,{json.dumps(f'ratio={ratio:.3f}')},combined,"
+                    f"0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,{float(sess['fixed_dpi']):.3f},"
+                    f"{float(full0['syncSpeed']):.6f},{float(full0['motivity']):.6f},{float(full0['gamma']):.6f},{float(full0['smooth']):.6f},{float(full0.get('yToXRatio', 1.0)):.6f},,0,0,{float(score0):.6f},baseline,0.0\n"
+                )
+
+            if ratio < float(sess.get("baseline_drop_ratio", 0.85)):
+                cont = messagebox.askyesno(
+                    "Drift",
+                    f"Baseline dropped to {ratio*100:.0f}% of start. Continue?",
+                )
+                if not cont:
+                    self._stop_requested = True
+                    self._finish("Stopped")
+                    return
 
         cand = dict(sess["candidate"])
         full = {"mode": "synchronous", "outputDpi": float(sess["fixed_dpi"]), **cand}
@@ -1730,44 +3249,199 @@ class App(tk.Tk):
             self.after(50, self._ai_eval_step)
             return
 
-        self.status_var.set(f"AI tune {it+1}/{sess['max_iters']}: play")
+        step_frac = float(sess.get("step_frac", 0.25))
 
-        eval_res = self._eval_drills(
-            int(self.seed_var.get()) + 50000 + it,
-            baseline=sess.get("baseline"),
-            progress_hook=self._progress_hook,
+        max_iters = int(sess.get("max_iters", 0))
+        axis_total = int(sess.get("axis_iters", 0))
+        if axis_total > 0 and it < axis_total:
+            stage_label = f"Axis {it+1}/{axis_total}"
+        else:
+            curve_total = max(1, max_iters - axis_total) if axis_total > 0 else max(1, max_iters)
+            curve_idx = it - axis_total + 1 if axis_total > 0 else it + 1
+            stage_label = f"Curve {max(1, curve_idx)}/{curve_total}"
+
+        params_line = (
+            f"sync={full['syncSpeed']:.3f} mot={full['motivity']:.3f} g={full['gamma']:.3f} "
+            f"s={full['smooth']:.3f} yx={float(full.get('yToXRatio', 1.0)):.3f} step={step_frac:.2f}"
         )
-        if eval_res is None:
-            self._stop_requested = True
-            self._finish("Stopped")
-            return
+        self.status_var.set(f"AI {stage_label} (iter {it+1}/{max_iters}): {params_line}")
 
-        score = float(eval_res.get("combined_score", float("-inf")))
+        seed_base = int(sess.get("seed_base", 0))
+        eval_repeats_max = max(1, int(sess.get("eval_repeats", 1)))
+        eval_repeats_min = max(1, int(sess.get("eval_repeats_min", 1)))
+        eval_repeats_min = min(eval_repeats_min, eval_repeats_max)
+        rep_seed0 = seed_base + 50000 + it * 1000
+
+        repeat_gate_ratio = float(sess.get("repeat_gate_ratio", 0.05))
+
+        repeat_runs = []
+
+        def run_one(rep):
+            self.status_var.set(f"AI {stage_label} (iter {it+1}/{max_iters}) rep {rep+1}/{eval_repeats_max}: {params_line}")
+            ev = self._eval_drills(
+                rep_seed0 + rep * 10,
+                baseline=sess.get("baseline"),
+                progress_hook=self._progress_hook,
+            )
+            if ev is None:
+                return None
+            return (float(ev.get("combined_score", float("-inf"))), ev)
+
+        for rep in range(eval_repeats_min):
+            out = run_one(rep)
+            if out is None:
+                self._stop_requested = True
+                self._finish("Stopped")
+                return
+            repeat_runs.append(out)
+
+        def current_median_score():
+            xs = sorted(float(s) for s, _ in repeat_runs)
+            return float(xs[len(xs) // 2]) if xs else float("-inf")
+
+        def should_refine():
+            best = float(sess.get("best_score", float("-inf")))
+            if not math.isfinite(best):
+                return True
+            noise = float(sess.get("noise_est", 0.0))
+            margin = max(abs(best) * float(repeat_gate_ratio), noise)
+            return current_median_score() >= (best - margin)
+
+        rep = eval_repeats_min
+        while rep < eval_repeats_max and should_refine():
+            out = run_one(rep)
+            if out is None:
+                self._stop_requested = True
+                self._finish("Stopped")
+                return
+            repeat_runs.append(out)
+            rep += 1
+
+        repeat_runs.sort(key=lambda x: x[0])
+        score = float(repeat_runs[len(repeat_runs) // 2][0])
+        eval_res = repeat_runs[len(repeat_runs) // 2][1]
+        repeat_scores = [float(s) for s, _ in repeat_runs]
+        try:
+            score_mean = float(statistics.mean(repeat_scores))
+        except Exception:
+            score_mean = float(score)
+        try:
+            score_std = float(statistics.pstdev(repeat_scores)) if len(repeat_scores) >= 2 else 0.0
+        except Exception:
+            score_std = 0.0
         reason = ""
         conf = 0.0
+
+        if sess.get("baseline_candidate") is None:
+            sess["baseline_candidate"] = dict(cand)
+            sess["baseline_score"] = float(score)
 
         record = {
             "iter": it,
             "candidate": cand,
             "score": score,
+            "score_mean": score_mean,
+            "score_std": score_std,
+            "repeat_scores": repeat_scores,
             "eval": eval_res,
         }
         sess["history"].append(record)
         if len(sess["history"]) > int(sess["history_limit"]):
             sess["history"] = sess["history"][len(sess["history"]) - int(sess["history_limit"]) :]
 
-        improved = score > float(sess.get("best_score", float("-inf")))
+        selection_metric = str(sess.get("selection_metric", "median") or "median")
+        stability_k = float(sess.get("stability_k", 0.5))
+        metric_score = float(score)
+        if selection_metric == "stable":
+            metric_score = float(score_mean) - float(stability_k) * float(score_std)
+
+        improved = metric_score > float(sess.get("best_score", float("-inf")))
         if improved:
-            sess["best_score"] = score
+            prev_best = sess.get("best")
+            prev_best_sig = sess.get("best_sig")
+            prev_best_score = float(sess.get("best_score", float("-inf")))
+            sess["best_score"] = float(metric_score)
             sess["best"] = dict(full)
+            sess["best_sig"] = (
+                round(float(full.get("syncSpeed", 0.0)), 6),
+                round(float(full.get("motivity", 0.0)), 6),
+                round(float(full.get("gamma", 0.0)), 6),
+                round(float(full.get("smooth", 0.0)), 6),
+                round(float(full.get("yToXRatio", 1.0)), 6),
+            )
+            if isinstance(prev_best, dict) and prev_best_sig is not None and math.isfinite(prev_best_score):
+                sess["second"] = dict(prev_best)
+                sess["second_score"] = float(prev_best_score)
+                sess["second_sig"] = prev_best_sig
             sess["no_improve"] = 0
             self.best_var.set(
-                f"Best {score:.3f}: DPI={full['outputDpi']:.1f} sync={full['syncSpeed']:.3f} mot={full['motivity']:.3f} g={full['gamma']:.3f} s={full['smooth']:.3f}"
+                f"Best metric={float(metric_score):.3f} raw={score:.3f} mean={score_mean:.3f} std={score_std:.3f}: DPI={full['outputDpi']:.1f} sync={full['syncSpeed']:.3f} mot={full['motivity']:.3f} g={full['gamma']:.3f} s={full['smooth']:.3f} yx={float(full.get('yToXRatio', 1.0)):.3f}"
             )
         else:
             sess["no_improve"] = int(sess.get("no_improve", 0)) + 1
+            sig = (
+                round(float(full.get("syncSpeed", 0.0)), 6),
+                round(float(full.get("motivity", 0.0)), 6),
+                round(float(full.get("gamma", 0.0)), 6),
+                round(float(full.get("smooth", 0.0)), 6),
+                round(float(full.get("yToXRatio", 1.0)), 6),
+            )
+            if sig != sess.get("best_sig") and metric_score > float(sess.get("second_score", float("-inf"))):
+                sess["second"] = dict(full)
+                sess["second_score"] = float(metric_score)
+                sess["second_sig"] = sig
 
-        def log_one(tag, r, s, conf, reason):
+        scores = [float(h.get("score", 0.0)) for h in sess.get("history", []) if math.isfinite(float(h.get("score", 0.0)))]
+        if len(scores) >= 3:
+            window = scores[-min(6, len(scores)) :]
+            try:
+                noise_hist = float(statistics.pstdev(window))
+            except Exception:
+                noise_hist = 0.0
+        else:
+            noise_hist = 0.0
+
+        noise_iter = float(record.get("score_std", 0.0)) if isinstance(record, dict) else 0.0
+        sess["noise_est"] = float(max(noise_hist, noise_iter))
+
+        step_frac = float(sess.get("step_frac", 0.25))
+        min_step = float(sess.get("min_step_frac", 0.08))
+        max_step = float(sess.get("max_step_frac", 0.35))
+        if improved:
+            step_frac = max(min_step, step_frac * 0.9)
+        else:
+            if int(sess.get("no_improve", 0)) >= 2:
+                step_frac = min(max_step, step_frac * 1.15)
+        noise = float(sess.get("noise_est", 0.0))
+        if math.isfinite(noise) and noise > 0.0 and math.isfinite(score) and abs(score) > 1e-9:
+            if (noise / abs(score)) > 0.15:
+                step_frac = max(min_step, step_frac * 0.9)
+        sess["step_frac"] = float(min(max_step, max(min_step, step_frac)))
+
+        def log_one(tag, r, s, conf, reason, score_mean=0.0, score_std=0.0, metric_score=None):
+            weakness_path = ""
+            if isinstance(r, dict) and (isinstance(r.get("dir_bins"), dict) or isinstance(r.get("dir_summary"), dict)):
+                weakness_path = f"weakness_{it:03d}_{tag}.json"
+                try:
+                    (pathlib.Path(sess["run_dir"]) / weakness_path).write_text(
+                        json.dumps(
+                            {
+                                "tag": str(tag),
+                                "iter": int(it),
+                                "dir_bins": r.get("dir_bins"),
+                                "dir_summary": r.get("dir_summary"),
+                            },
+                            ensure_ascii=False,
+                        ),
+                        encoding="utf-8",
+                    )
+                except Exception:
+                    weakness_path = ""
+            selection_metric = str(sess.get("selection_metric", "median") or "median")
+            stability_k = float(sess.get("stability_k", 0.5))
+            if metric_score is None:
+                metric_score = float(s)
+
             with open(sess["log_path"], "a", encoding="utf-8") as f:
                 f.write(
                     f"ai,{it},{float(s):.6f},{float(conf):.3f},{json.dumps(str(reason)[:200])},{tag},"
@@ -1775,15 +3449,18 @@ class App(tk.Tk):
                     f"{float(r.get('avg_path_eff', 0.0)):.6f},{float(r.get('avg_perp_dev', 0.0)):.6f},{float(r.get('avg_overshoots', 0.0)):.6f},{float(r.get('avg_reaccels', 0.0)):.6f},"
                     f"{float(r.get('avg_time_to_move_ms', 0.0)):.6f},{float(r.get('avg_correction_ms', 0.0)):.6f},"
                     f"{float(r.get('avg_bias_x', 0.0)):.6f},{float(r.get('avg_bias_y', 0.0)):.6f},"
-                    f"{float(full['outputDpi']):.3f},{float(full['syncSpeed']):.6f},{float(full['motivity']):.6f},{float(full['gamma']):.6f},{float(full['smooth']):.6f}\n"
+                    f"{float(r.get('h_miss_rate', 1.0)):.6f},{float(r.get('v_miss_rate', 1.0)):.6f},"
+                    f"{float(r.get('h_p90_error_px', 0.0)):.6f},{float(r.get('v_p90_error_px', 0.0)):.6f},"
+                    f"{float(full['outputDpi']):.3f},{float(full['syncSpeed']):.6f},{float(full['motivity']):.6f},{float(full['gamma']):.6f},{float(full['smooth']):.6f},{float(full.get('yToXRatio', 1.0)):.6f},{weakness_path},"
+                    f"{float(score_mean):.6f},{float(score_std):.6f},{float(metric_score):.6f},{selection_metric},{float(stability_k):.3f}\n"
                 )
 
         if "single" in eval_res:
-            log_one("single", eval_res["single"], score, conf, reason)
+            log_one("single", eval_res["single"], score, conf, reason, score_mean=score_mean, score_std=score_std, metric_score=metric_score)
         else:
             log_one("micro", eval_res["micro"], float(eval_res.get("micro_score", 0.0)), conf, reason)
             log_one("flick", eval_res["flick"], float(eval_res.get("flick_score", 0.0)), conf, reason)
-            log_one("combined", {"throughput": 0.0, "miss_rate": 0.0}, score, conf, reason)
+            log_one("combined", {"throughput": 0.0, "miss_rate": 0.0}, score, conf, reason, score_mean=score_mean, score_std=score_std, metric_score=metric_score)
 
         sess["ai_result"] = None
         sess["ai_error"] = None
@@ -1791,31 +3468,222 @@ class App(tk.Tk):
         def worker():
             try:
                 bounds = sess["bounds"]
+                axis_iters = int(sess.get("axis_iters", 0))
+                stage = "axis" if axis_iters > 0 and it < axis_iters else "curve"
+                notes = "Prefer stable improvements. Keep motivity>1, gamma>0, syncSpeed>0, smooth in [0,1]."
+                if stage == "axis":
+                    notes = notes + " Axis stage: ONLY change yToXRatio; keep syncSpeed/motivity/gamma/smooth the same."
+
+                hist = sess.get("history")
+                if not isinstance(hist, list):
+                    hist = []
+
+                def _sig(c):
+                    if not isinstance(c, dict):
+                        return None
+                    return (
+                        round(float(c.get("syncSpeed", 0.0)), 6),
+                        round(float(c.get("motivity", 0.0)), 6),
+                        round(float(c.get("gamma", 0.0)), 6),
+                        round(float(c.get("smooth", 0.0)), 6),
+                        round(float(c.get("yToXRatio", 1.0)), 6),
+                    )
+
+                def _top_k(rows, k):
+                    rows = [r for r in rows if isinstance(r, dict) and math.isfinite(float(r.get("score", float("nan"))))]
+                    rows.sort(key=lambda r: float(r.get("score", float("-inf"))), reverse=True)
+                    out = []
+                    seen = set()
+                    for r in rows:
+                        sig = _sig(r.get("candidate"))
+                        if sig is None or sig in seen:
+                            continue
+                        seen.add(sig)
+                        out.append(
+                            {
+                                "iter": int(r.get("iter", 0)),
+                                "score": float(r.get("score", 0.0)),
+                                "score_mean": float(r.get("score_mean", r.get("score", 0.0))),
+                                "score_std": float(r.get("score_std", 0.0)),
+                                "candidate": r.get("candidate"),
+                                "summary": _ai_eval_summary(r.get("eval")),
+                            }
+                        )
+                        if len(out) >= k:
+                            break
+                    return out
+
+                def _recent(rows, k):
+                    rows2 = [r for r in rows if isinstance(r, dict)]
+                    rows2.sort(key=lambda r: int(r.get("iter", 0)))
+                    rows2 = rows2[-k:]
+                    out = []
+                    for r in rows2:
+                        out.append(
+                            {
+                                "iter": int(r.get("iter", 0)),
+                                "score": float(r.get("score", 0.0)),
+                                "score_mean": float(r.get("score_mean", r.get("score", 0.0))),
+                                "score_std": float(r.get("score_std", 0.0)),
+                                "candidate": r.get("candidate"),
+                                "summary": _ai_eval_summary(r.get("eval")),
+                            }
+                        )
+                    return out
+
+                recent = _recent(hist, 8)
+                top = _top_k(hist, 5)
+                noise_est = float(sess.get("noise_est", 0.0))
+                step_frac = float(sess.get("step_frac", 0.25))
+                no_improve = int(sess.get("no_improve", 0))
+                best_score = float(sess.get("best_score", float("-inf")))
+
+                def _diag_from_dir_summary(ds, label):
+                    if not isinstance(ds, dict):
+                        return None
+                    worst = []
+                    for k in ("worst_miss", "worst_p90"):
+                        xs = ds.get(k)
+                        if not isinstance(xs, list):
+                            continue
+                        for r in xs:
+                            if not isinstance(r, dict):
+                                continue
+                            worst.append(r)
+                    if not worst:
+                        return None
+
+                    def center_deg(r):
+                        try:
+                            return 0.5 * (float(r.get("deg0", 0.0)) + float(r.get("deg1", 0.0)))
+                        except Exception:
+                            return 0.0
+
+                    uniq = {}
+                    for r in worst:
+                        try:
+                            b = int(r.get("bin"))
+                        except Exception:
+                            continue
+                        if b not in uniq:
+                            uniq[b] = r
+                    items = list(uniq.values())
+                    items.sort(key=lambda r: (float(r.get("miss_rate", 0.0)), float(r.get("p90_error_px", 0.0))), reverse=True)
+                    items = items[:6]
+
+                    sp33 = float(ds.get("speed_p33", 0.0) or 0.0)
+                    sp66 = float(ds.get("speed_p66", 0.0) or 0.0)
+
+                    recs = []
+                    vert_votes = 0
+                    vert_bias = 0.0
+                    overshoot_votes = 0
+                    undershoot_votes = 0
+                    high_speed_votes = 0
+                    low_speed_votes = 0
+                    for r in items:
+                        deg = center_deg(r)
+                        rad = math.radians(float(deg))
+                        vx = abs(math.cos(rad))
+                        vy = abs(math.sin(rad))
+                        bpar = float(r.get("bias_parallel_mean", 0.0) or 0.0)
+                        spd = float(r.get("speed_mean", 0.0) or 0.0)
+                        if vy >= 0.85:
+                            vert_votes += 1
+                            vert_bias += bpar
+                        if bpar >= 2.0:
+                            overshoot_votes += 1
+                        if bpar <= -2.0:
+                            undershoot_votes += 1
+                        if spd >= sp66 and sp66 > 0:
+                            high_speed_votes += 1
+                        if spd <= sp33 and sp33 > 0:
+                            low_speed_votes += 1
+
+                    if vert_votes >= 2:
+                        if vert_bias > 2.0:
+                            recs.append({"action": "yToXRatio", "direction": "decrease", "reason": "vertical-ish bins overshoot (b_parallel>0)"})
+                        if vert_bias < -2.0:
+                            recs.append({"action": "yToXRatio", "direction": "increase", "reason": "vertical-ish bins undershoot (b_parallel<0)"})
+
+                    if high_speed_votes >= 2 and overshoot_votes >= 2:
+                        recs.append({"action": "curve_aggression", "direction": "decrease", "reason": "high-speed bins overshoot"})
+                    if low_speed_votes >= 2 and undershoot_votes >= 2:
+                        recs.append({"action": "low_speed_gain", "direction": "increase", "reason": "low-speed bins undershoot"})
+
+                    return {
+                        "label": str(label),
+                        "speed_p33": sp33,
+                        "speed_p66": sp66,
+                        "worst_bins": [
+                            {
+                                "bin": int(r.get("bin", 0)),
+                                "deg0": float(r.get("deg0", 0.0) or 0.0),
+                                "deg1": float(r.get("deg1", 0.0) or 0.0),
+                                "n": int(r.get("n", 0) or 0),
+                                "miss_rate": float(r.get("miss_rate", 0.0) or 0.0),
+                                "p90_error_px": float(r.get("p90_error_px", 0.0) or 0.0),
+                                "bias_parallel_mean": float(r.get("bias_parallel_mean", 0.0) or 0.0),
+                                "bias_perp_mean": float(r.get("bias_perp_mean", 0.0) or 0.0),
+                                "speed_mean": float(r.get("speed_mean", 0.0) or 0.0),
+                            }
+                            for r in items
+                        ],
+                        "recommendations": recs,
+                    }
+
+                trend = {
+                    "stage": stage,
+                    "iter": int(it),
+                    "no_improve": no_improve,
+                    "step_frac": step_frac,
+                    "noise_est": noise_est,
+                    "eval_repeats": int(sess.get("eval_repeats", 1)),
+                    "best_score": best_score,
+                    "best_candidate": dict(sess.get("best", {})) if isinstance(sess.get("best"), dict) else None,
+                    "second_score": float(sess.get("second_score", float("-inf"))),
+                    "second_candidate": dict(sess.get("second", {})) if isinstance(sess.get("second"), dict) else None,
+                    "top": top,
+                    "recent": recent,
+                }
+
+                last_diag = None
+                if recent:
+                    last_sum = recent[-1].get("summary") if isinstance(recent[-1], dict) else None
+                    if isinstance(last_sum, dict):
+                        if isinstance(last_sum.get("single"), dict):
+                            last_diag = {"single": _diag_from_dir_summary(last_sum.get("single", {}).get("dir_summary"), "single")}
+                        else:
+                            last_diag = {
+                                "micro": _diag_from_dir_summary(last_sum.get("micro", {}).get("dir_summary"), "micro"),
+                                "flick": _diag_from_dir_summary(last_sum.get("flick", {}).get("dir_summary"), "flick"),
+                            }
+
                 state = {
                     "mode": "synchronous",
                     "bounds": bounds,
                     "fixed": {"outputDpi": float(sess["fixed_dpi"])},
-                    "history": [
-                        {
-                            "iter": int(h["iter"]),
-                            "candidate": h["candidate"],
-                            "score": float(h["score"]),
-                            "summary": _ai_eval_summary(h["eval"]),
-                        }
-                        for h in sess["history"]
-                    ],
+                    "diagnosis": last_diag,
+                    "history": _recent(hist, int(sess.get("history_limit", 12))),
+                    "trend": trend,
                     "best": {
                         "score": float(sess.get("best_score", float("-inf"))),
                         "candidate": dict(sess.get("best", {})),
                     },
                     "objective": {
                         "goal": "maximize combined_score",
-                        "notes": "Prefer stable improvements. Keep motivity>1, gamma>0, syncSpeed>0, smooth in [0,1].",
+                        "notes": notes,
                     },
                     "limits": {
                         "iter": it,
                         "max_iters": int(sess["max_iters"]),
                         "no_improve": int(sess.get("no_improve", 0)),
+                        "step_frac": float(sess.get("step_frac", 0.25)),
+                        "noise_est": float(sess.get("noise_est", 0.0)),
+                        "eval_repeats": int(sess.get("eval_repeats", 1)),
+                        "stage": stage,
+                        "selection_metric": str(sess.get("selection_metric", "median")),
+                        "stability_k": float(sess.get("stability_k", 0.5)),
                     },
                 }
 
@@ -1823,6 +3691,13 @@ class App(tk.Tk):
                 content = sess["client"].chat(msgs, temperature=float(sess["temperature"]))
                 parsed = ai_tuner.parse_ai_response(content)
                 cand2 = ai_tuner.clamp_candidate(parsed["candidate"], bounds)
+                if "yToXRatio" in bounds and "yToXRatio" not in cand2 and isinstance(cand, dict) and "yToXRatio" in cand:
+                    cand2["yToXRatio"] = float(cand.get("yToXRatio", 1.0))
+
+                if stage == "axis" and isinstance(cand, dict):
+                    for k in ("syncSpeed", "motivity", "gamma", "smooth"):
+                        if k in cand:
+                            cand2[k] = float(cand[k])
                 cand2 = self._limit_step(cand2, cand, bounds, float(sess.get("step_frac", 0.25)))
                 parsed["candidate"] = cand2
                 sess["ai_result"] = parsed
@@ -1835,21 +3710,50 @@ class App(tk.Tk):
         def _ai_eval_summary(ev):
             if not isinstance(ev, dict):
                 return {}
+
+            def pack(r):
+                if not isinstance(r, dict):
+                    return {}
+                out = {}
+                for k in (
+                    "throughput",
+                    "miss_rate",
+                    "p90_error_px",
+                    "avg_path_eff",
+                    "avg_perp_dev",
+                    "avg_overshoots",
+                    "avg_reaccels",
+                    "avg_time_to_move_ms",
+                    "avg_correction_ms",
+                    "avg_bias_x",
+                    "avg_bias_y",
+                    "h_miss_rate",
+                    "v_miss_rate",
+                    "h_p90_error_px",
+                    "v_p90_error_px",
+                ):
+                    if k in r and r.get(k) is not None:
+                        out[k] = r.get(k)
+                if isinstance(r.get("dir_summary"), dict):
+                    out["dir_summary"] = r.get("dir_summary")
+                return out
+
             if "single" in ev:
-                return {"score": float(ev.get("combined_score", 0.0)), "single": ev["single"]}
+                return {"score": float(ev.get("combined_score", 0.0)), "single": pack(ev["single"])}
             return {
                 "score": float(ev.get("combined_score", 0.0)),
                 "micro_score": float(ev.get("micro_score", 0.0)),
                 "flick_score": float(ev.get("flick_score", 0.0)),
-                "micro": ev.get("micro"),
-                "flick": ev.get("flick"),
+                "micro": pack(ev.get("micro")),
+                "flick": pack(ev.get("flick")),
             }
 
         thread = threading.Thread(target=worker, daemon=True)
         sess["ai_thread"] = thread
         thread.start()
 
-        self.status_var.set(f"AI tune {it+1}/{sess['max_iters']}: thinking")
+        self.status_var.set(f"AI {stage_label} (iter {it+1}/{max_iters}): thinking")
+        self.ai_var.set("AI: waiting for suggestion")
         self.after(200, self._ai_poll)
 
     def _ai_poll(self):
@@ -1884,22 +3788,279 @@ class App(tk.Tk):
             self._finish("Error")
             return
 
+        cur = None
+        hist = sess.get("history")
+        if isinstance(hist, list) and hist:
+            last = hist[-1]
+            if isinstance(last, dict) and isinstance(last.get("candidate"), dict):
+                cur = last["candidate"]
+        if not isinstance(cur, dict):
+            cur = sess.get("candidate") if isinstance(sess.get("candidate"), dict) else None
+
+        def d(name):
+            if not isinstance(cur, dict):
+                return 0.0
+            return float(cand2.get(name, 0.0)) - float(cur.get(name, 0.0))
+
+        step_frac = float(sess.get("step_frac", 0.25))
+        ai_line = (
+            f"AI: conf={conf:.2f} stop={str(stop).lower()} step={step_frac:.2f} "
+            f"Δsync={d('syncSpeed'):+.3f} Δmot={d('motivity'):+.3f} Δg={d('gamma'):+.3f} Δs={d('smooth'):+.3f} Δyx={d('yToXRatio'):+.3f} "
+            f"{reason[:90]}"
+        )
+        self.ai_var.set(ai_line)
+
         with open(sess["log_path"], "a", encoding="utf-8") as f:
-            f.write(f"ai,{int(sess['iter'])},0.000000,{conf:.3f},{json.dumps(reason[:200])},ai_note,0,0,0,0,0,0,0,0,0,0,0,{float(sess['fixed_dpi']):.3f},{cand2['syncSpeed']:.6f},{cand2['motivity']:.6f},{cand2['gamma']:.6f},{cand2['smooth']:.6f}\n")
+            f.write(
+                f"ai,{int(sess['iter'])},0.000000,{conf:.3f},{json.dumps(reason[:200])},ai_note,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,{float(sess['fixed_dpi']):.3f},{cand2['syncSpeed']:.6f},{cand2['motivity']:.6f},{cand2['gamma']:.6f},{cand2['smooth']:.6f},{float(cand2.get('yToXRatio', 1.0)):.6f},,0,0,0,ai_note,0.0\n"
+            )
 
         if stop and conf >= float(sess["confidence_threshold"]) and int(sess["iter"]) >= 3:
+            best = sess.get("best")
+            challenger = sess.get("second")
+            best_sig = sess.get("best_sig")
+            chal_sig = sess.get("second_sig")
+            if challenger is None and isinstance(sess.get("baseline_candidate"), dict):
+                challenger = {"mode": "synchronous", "outputDpi": float(sess["fixed_dpi"]), **dict(sess["baseline_candidate"])}
+                chal_sig = (
+                    round(float(challenger.get("syncSpeed", 0.0)), 6),
+                    round(float(challenger.get("motivity", 0.0)), 6),
+                    round(float(challenger.get("gamma", 0.0)), 6),
+                    round(float(challenger.get("smooth", 0.0)), 6),
+                    round(float(challenger.get("yToXRatio", 1.0)), 6),
+                )
+
+            if not isinstance(best, dict) or not isinstance(challenger, dict) or best_sig is None or chal_sig is None or best_sig == chal_sig:
+                self._last_best = dict(best) if isinstance(best, dict) else None
+                self._finish("Done")
+                return
+
+            confirm_repeats = int(sess.get("confirm_repeats", 2))
+            runs_per_eval = int(sess.get("runs_per_eval", 1))
+            eval_repeats = int(sess.get("eval_repeats", 1))
+            self._ai_bump_total_runs(confirm_repeats * 2 * runs_per_eval * max(1, eval_repeats))
+            sess["confirm"] = {
+                "best": dict(best),
+                "challenger": dict(challenger),
+                "repeats": confirm_repeats,
+                "round": 0,
+                "pairs": [],
+                "seed_base": int(sess.get("seed_base", 0)) + 71000 + int(sess["iter"]) * 10,
+                "pending_next": dict(cand2),
+            }
+            self._save_ai_state()
+            self.status_var.set("AI tune: confirm")
+            self.after(50, self._ai_confirm_step)
+            return
+
+        max_no_improve = int(sess.get("max_no_improve", 6))
+        if max_no_improve > 0 and int(sess.get("no_improve", 0)) >= max_no_improve and int(sess["iter"]) >= max(6, max_no_improve // 2):
+            if self._ai_start_final_confirm("no_improve"):
+                return
             self._last_best = dict(sess["best"]) if isinstance(sess.get("best"), dict) else None
             self._finish("Done")
             return
 
-        if int(sess.get("no_improve", 0)) >= 6 and int(sess["iter"]) >= 6:
-            self._last_best = dict(sess["best"]) if isinstance(sess.get("best"), dict) else None
-            self._finish("Done")
-            return
+        noise = float(sess.get("noise_est", 0.0))
+        recent = [float(h.get("score", 0.0)) for h in sess.get("history", []) if math.isfinite(float(h.get("score", 0.0)))]
+        recent = recent[-5:]
+        if len(recent) >= 5:
+            spread = max(recent) - min(recent)
+            floor = max(0.75 * noise, 0.01 * abs(float(sess.get("best_score", 0.0))))
+            if (
+                bool(sess.get("plateau_stop", True))
+                and spread <= floor
+                and int(sess.get("no_improve", 0)) >= 4
+                and float(sess.get("step_frac", 0.25)) <= float(sess.get("min_step_frac", 0.08)) * 1.25
+            ):
+                self._last_best = dict(sess["best"]) if isinstance(sess.get("best"), dict) else None
+                self._finish("Done")
+                return
 
         sess["candidate"] = dict(cand2)
         sess["iter"] = int(sess["iter"]) + 1
+        self._save_ai_state()
         self.after(100, self._ai_eval_step)
+
+    def _ai_start_final_confirm(self, reason):
+        sess = self._session
+        if not isinstance(sess, dict) or sess.get("type") != "ai":
+            return False
+
+        repeats = int(sess.get("final_confirm_repeats", 0))
+        if repeats <= 0:
+            return False
+
+        best = sess.get("best")
+        challenger = sess.get("second")
+        best_sig = sess.get("best_sig")
+        chal_sig = sess.get("second_sig")
+        if challenger is None and isinstance(sess.get("baseline_candidate"), dict):
+            challenger = {"mode": "synchronous", "outputDpi": float(sess["fixed_dpi"]), **dict(sess["baseline_candidate"])}
+            chal_sig = (
+                round(float(challenger.get("syncSpeed", 0.0)), 6),
+                round(float(challenger.get("motivity", 0.0)), 6),
+                round(float(challenger.get("gamma", 0.0)), 6),
+                round(float(challenger.get("smooth", 0.0)), 6),
+                round(float(challenger.get("yToXRatio", 1.0)), 6),
+            )
+
+        if not isinstance(best, dict) or not isinstance(challenger, dict) or best_sig is None or chal_sig is None or best_sig == chal_sig:
+            return False
+
+        runs_per_eval = int(sess.get("runs_per_eval", 1))
+        eval_repeats = int(sess.get("eval_repeats", 1))
+        eval_repeats = max(1, eval_repeats)
+        self._ai_bump_total_runs(repeats * 2 * runs_per_eval * eval_repeats)
+
+        sess["confirm"] = {
+            "best": dict(best),
+            "challenger": dict(challenger),
+            "repeats": int(repeats),
+            "round": 0,
+            "pairs": [],
+            "seed_base": int(sess.get("seed_base", 0)) + 91000 + int(sess.get("iter", 0)) * 10,
+            "pending_next": None,
+            "final": True,
+            "reason": str(reason),
+        }
+        self._save_ai_state()
+        self.status_var.set("AI tune: final confirm")
+        self.after(50, self._ai_confirm_step)
+        return True
+
+    def _ai_bump_total_runs(self, extra):
+        sess = self._session
+        if not isinstance(sess, dict) or sess.get("type") != "ai":
+            return
+        extra = int(extra)
+        if extra <= 0:
+            return
+        sess["total_runs"] = int(sess.get("total_runs", 0)) + extra
+        self.progress_var.set(f"{int(sess.get('current_run', 0))}/{int(sess.get('total_runs', 0))}")
+
+    def _ai_confirm_step(self):
+        sess = self._session
+        if not isinstance(sess, dict) or sess.get("type") != "ai":
+            return
+        if self._stop_requested:
+            self._finish("Stopped")
+            return
+        conf = sess.get("confirm")
+        if not isinstance(conf, dict):
+            return
+
+        r = int(conf.get("round", 0))
+        repeats = int(conf.get("repeats", 0))
+        if r >= repeats:
+            pairs = conf.get("pairs")
+            if not isinstance(pairs, list) or not pairs:
+                self._finish("Done")
+                return
+
+            wins = sum(1 for p in pairs if float(p.get("best", float("-inf"))) >= float(p.get("challenger", float("inf"))))
+            win_rate = wins / float(len(pairs))
+            best_mean = sum(float(p.get("best", 0.0)) for p in pairs) / float(len(pairs))
+            chal_mean = sum(float(p.get("challenger", 0.0)) for p in pairs) / float(len(pairs))
+            diffs = [float(p.get("best", 0.0)) - float(p.get("challenger", 0.0)) for p in pairs]
+            try:
+                diff_noise = float(statistics.pstdev(diffs)) if len(diffs) >= 2 else 0.0
+            except Exception:
+                diff_noise = 0.0
+            margin = max(0.5 * diff_noise, 0.01 * abs(chal_mean))
+
+            if bool(conf.get("final")):
+                best_cand = conf.get("best")
+                chal_cand = conf.get("challenger")
+                winner = best_cand
+                winner_score = best_mean
+                if chal_mean > best_mean:
+                    winner = chal_cand
+                    winner_score = chal_mean
+                if isinstance(winner, dict):
+                    sess["best"] = dict(winner)
+                    sess["best_score"] = float(winner_score)
+                    sess["best_sig"] = (
+                        round(float(winner.get("syncSpeed", 0.0)), 6),
+                        round(float(winner.get("motivity", 0.0)), 6),
+                        round(float(winner.get("gamma", 0.0)), 6),
+                        round(float(winner.get("smooth", 0.0)), 6),
+                        round(float(winner.get("yToXRatio", 1.0)), 6),
+                    )
+                    self._last_best = dict(winner)
+                self._finish("Done")
+                return
+
+            if win_rate >= float(sess.get("confirm_win_rate", 0.6)) and (best_mean - chal_mean) >= margin:
+                best = conf.get("best")
+                self._last_best = dict(best) if isinstance(best, dict) else None
+                self._finish("Done")
+                return
+
+            sess["confirm"] = None
+            pending = conf.get("pending_next")
+            if isinstance(pending, dict):
+                sess["candidate"] = dict(pending)
+            sess["iter"] = int(sess.get("iter", 0)) + 1
+            self._save_ai_state()
+            self.after(50, self._ai_eval_step)
+            return
+
+        seed = int(conf.get("seed_base", 0)) + r * 100
+        best = conf.get("best")
+        challenger = conf.get("challenger")
+        if not isinstance(best, dict) or not isinstance(challenger, dict):
+            self._finish("Done")
+            return
+
+        order = ["best", "challenger"]
+        if r % 2 == 1:
+            order = ["challenger", "best"]
+
+        round_scores = {"best": float("-inf"), "challenger": float("-inf")}
+        label = "Final confirm" if bool(conf.get("final")) else "Confirm"
+        for side in order:
+            if self._stop_requested:
+                self._finish("Stopped")
+                return
+
+            cand_full = best if side == "best" else challenger
+            self._draw_curve(cand_full)
+            path = pathlib.Path(sess["run_dir"]) / f"confirm_{r+1:02d}_{side}.json"
+            sess["controller"].write_candidate_settings(cand_full, path)
+            sess["controller"].apply_settings(path)
+            self.status_var.set(f"AI {label} {r+1}/{repeats} ({side})")
+
+            eval_repeats = int(sess.get("eval_repeats", 1))
+            eval_repeats = max(1, eval_repeats)
+            scores = []
+            for rep in range(eval_repeats):
+                self.status_var.set(f"AI {label} {r+1}/{repeats} ({side}) rep {rep+1}/{eval_repeats}")
+                ev = self._eval_drills(seed + rep * 10, progress_hook=self._progress_hook)
+                if ev is None:
+                    self._stop_requested = True
+                    self._finish("Stopped")
+                    return
+                scores.append(float(ev.get("combined_score", float("-inf"))))
+            scores.sort()
+            sc = float(scores[len(scores) // 2])
+            round_scores[side] = sc
+
+            with open(sess["log_path"], "a", encoding="utf-8") as f:
+                f.write(
+                    f"confirm,{int(sess.get('iter',0))},{sc:.6f},0.000,{json.dumps('confirm')},{side},"
+                    f"0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,{float(sess['fixed_dpi']):.3f},"
+                    f"{float(cand_full.get('syncSpeed', 0.0)):.6f},{float(cand_full.get('motivity', 0.0)):.6f},{float(cand_full.get('gamma', 0.0)):.6f},{float(cand_full.get('smooth', 0.0)):.6f},{float(cand_full.get('yToXRatio', 1.0)):.6f},,0,0,{sc:.6f},confirm,0.0\n"
+                )
+
+        pairs = conf.get("pairs")
+        if not isinstance(pairs, list):
+            pairs = []
+            conf["pairs"] = pairs
+        pairs.append({"seed": seed, "best": round_scores["best"], "challenger": round_scores["challenger"]})
+        conf["round"] = r + 1
+        self._save_ai_state()
+        self.after(50, self._ai_confirm_step)
 
 
 
