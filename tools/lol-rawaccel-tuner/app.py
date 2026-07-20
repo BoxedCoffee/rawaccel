@@ -1385,7 +1385,7 @@ class App(tk.Tk):
 
         log_path = run_dir / "results.csv"
         log_path.write_text(
-            "phase,iter,score,confidence,reason,tag,throughput,miss_rate,p90_error,pathEff,perpDev,overshoots,reaccels,timeToMoveMs,correctionMs,biasX,biasY,h_miss_rate,v_miss_rate,h_p90_error,v_p90_error,outputDpi,syncSpeed,motivity,gamma,smooth,yToXRatio,weakness_path\n",
+            "phase,iter,score,confidence,reason,tag,throughput,miss_rate,p90_error,pathEff,perpDev,overshoots,reaccels,timeToMoveMs,correctionMs,biasX,biasY,h_miss_rate,v_miss_rate,h_p90_error,v_p90_error,outputDpi,syncSpeed,motivity,gamma,smooth,yToXRatio,weakness_path,score_mean,score_std,metric_score,selection_metric,stability_k\n",
             encoding="utf-8",
         )
 
@@ -1552,7 +1552,7 @@ class App(tk.Tk):
                 f.write(
                     f"confirm,{r+1},{sc:.6f},0.000,{json.dumps('manual_confirm')},{side},"
                     f"0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,"
-                    f"{float(cand_full.get('outputDpi', 0.0)):.3f},{float(cand_full.get('syncSpeed', 0.0)):.6f},{float(cand_full.get('motivity', 0.0)):.6f},{float(cand_full.get('gamma', 0.0)):.6f},{float(cand_full.get('smooth', 0.0)):.6f},{float(cand_full.get('yToXRatio', 1.0)):.6f},{weakness_path}\n"
+                    f"{float(cand_full.get('outputDpi', 0.0)):.3f},{float(cand_full.get('syncSpeed', 0.0)):.6f},{float(cand_full.get('motivity', 0.0)):.6f},{float(cand_full.get('gamma', 0.0)):.6f},{float(cand_full.get('smooth', 0.0)):.6f},{float(cand_full.get('yToXRatio', 1.0)):.6f},{weakness_path},0,0,{sc:.6f},confirm,0.0\n"
                 )
 
         pairs = sess.get("pairs")
@@ -2527,10 +2527,10 @@ class App(tk.Tk):
             ratio = (score0 / float(baseline_score0)) if float(baseline_score0) != 0 else 1.0
             with open(sess["log_path"], "a", encoding="utf-8") as f:
                     f.write(
-                        f"baseline,{it},{float(score0):.6f},0.000,{json.dumps(f'ratio={ratio:.3f}')},combined,"
-                        f"0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,{float(sess['fixed_dpi']):.3f},"
-                        f"{float(full0['syncSpeed']):.6f},{float(full0['motivity']):.6f},{float(full0['gamma']):.6f},{float(full0['smooth']):.6f},{float(full0.get('yToXRatio', 1.0)):.6f},\n"
-                    )
+                    f"baseline,{it},{float(score0):.6f},0.000,{json.dumps(f'ratio={ratio:.3f}')},combined,"
+                    f"0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,{float(sess['fixed_dpi']):.3f},"
+                    f"{float(full0['syncSpeed']):.6f},{float(full0['motivity']):.6f},{float(full0['gamma']):.6f},{float(full0['smooth']):.6f},{float(full0.get('yToXRatio', 1.0)):.6f},,0,0,{float(score0):.6f},baseline,0.0\n"
+                )
 
             if ratio < float(sess.get("baseline_drop_ratio", 0.85)):
                 cont = messagebox.askyesno(
@@ -2680,7 +2680,7 @@ class App(tk.Tk):
                 sess["second_sig"] = prev_best_sig
             sess["no_improve"] = 0
             self.best_var.set(
-                f"Best {float(metric_score):.3f} (raw {score:.3f}): DPI={full['outputDpi']:.1f} sync={full['syncSpeed']:.3f} mot={full['motivity']:.3f} g={full['gamma']:.3f} s={full['smooth']:.3f} yx={float(full.get('yToXRatio', 1.0)):.3f}"
+                f"Best metric={float(metric_score):.3f} raw={score:.3f} mean={score_mean:.3f} std={score_std:.3f}: DPI={full['outputDpi']:.1f} sync={full['syncSpeed']:.3f} mot={full['motivity']:.3f} g={full['gamma']:.3f} s={full['smooth']:.3f} yx={float(full.get('yToXRatio', 1.0)):.3f}"
             )
         else:
             sess["no_improve"] = int(sess.get("no_improve", 0)) + 1
@@ -2723,7 +2723,7 @@ class App(tk.Tk):
                 step_frac = max(min_step, step_frac * 0.9)
         sess["step_frac"] = float(min(max_step, max(min_step, step_frac)))
 
-        def log_one(tag, r, s, conf, reason):
+        def log_one(tag, r, s, conf, reason, score_mean=0.0, score_std=0.0, metric_score=None):
             weakness_path = ""
             if isinstance(r, dict) and (isinstance(r.get("dir_bins"), dict) or isinstance(r.get("dir_summary"), dict)):
                 weakness_path = f"weakness_{it:03d}_{tag}.json"
@@ -2742,6 +2742,11 @@ class App(tk.Tk):
                     )
                 except Exception:
                     weakness_path = ""
+            selection_metric = str(sess.get("selection_metric", "median") or "median")
+            stability_k = float(sess.get("stability_k", 0.5))
+            if metric_score is None:
+                metric_score = float(s)
+
             with open(sess["log_path"], "a", encoding="utf-8") as f:
                 f.write(
                     f"ai,{it},{float(s):.6f},{float(conf):.3f},{json.dumps(str(reason)[:200])},{tag},"
@@ -2751,15 +2756,16 @@ class App(tk.Tk):
                     f"{float(r.get('avg_bias_x', 0.0)):.6f},{float(r.get('avg_bias_y', 0.0)):.6f},"
                     f"{float(r.get('h_miss_rate', 1.0)):.6f},{float(r.get('v_miss_rate', 1.0)):.6f},"
                     f"{float(r.get('h_p90_error_px', 0.0)):.6f},{float(r.get('v_p90_error_px', 0.0)):.6f},"
-                    f"{float(full['outputDpi']):.3f},{float(full['syncSpeed']):.6f},{float(full['motivity']):.6f},{float(full['gamma']):.6f},{float(full['smooth']):.6f},{float(full.get('yToXRatio', 1.0)):.6f},{weakness_path}\n"
+                    f"{float(full['outputDpi']):.3f},{float(full['syncSpeed']):.6f},{float(full['motivity']):.6f},{float(full['gamma']):.6f},{float(full['smooth']):.6f},{float(full.get('yToXRatio', 1.0)):.6f},{weakness_path},"
+                    f"{float(score_mean):.6f},{float(score_std):.6f},{float(metric_score):.6f},{selection_metric},{float(stability_k):.3f}\n"
                 )
 
         if "single" in eval_res:
-            log_one("single", eval_res["single"], score, conf, reason)
+            log_one("single", eval_res["single"], score, conf, reason, score_mean=score_mean, score_std=score_std, metric_score=metric_score)
         else:
             log_one("micro", eval_res["micro"], float(eval_res.get("micro_score", 0.0)), conf, reason)
             log_one("flick", eval_res["flick"], float(eval_res.get("flick_score", 0.0)), conf, reason)
-            log_one("combined", {"throughput": 0.0, "miss_rate": 0.0}, score, conf, reason)
+            log_one("combined", {"throughput": 0.0, "miss_rate": 0.0}, score, conf, reason, score_mean=score_mean, score_std=score_std, metric_score=metric_score)
 
         sess["ai_result"] = None
         sess["ai_error"] = None
@@ -3002,7 +3008,9 @@ class App(tk.Tk):
         self.ai_var.set(ai_line)
 
         with open(sess["log_path"], "a", encoding="utf-8") as f:
-            f.write(f"ai,{int(sess['iter'])},0.000000,{conf:.3f},{json.dumps(reason[:200])},ai_note,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,{float(sess['fixed_dpi']):.3f},{cand2['syncSpeed']:.6f},{cand2['motivity']:.6f},{cand2['gamma']:.6f},{cand2['smooth']:.6f},{float(cand2.get('yToXRatio', 1.0)):.6f},\n")
+            f.write(
+                f"ai,{int(sess['iter'])},0.000000,{conf:.3f},{json.dumps(reason[:200])},ai_note,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,{float(sess['fixed_dpi']):.3f},{cand2['syncSpeed']:.6f},{cand2['motivity']:.6f},{cand2['gamma']:.6f},{cand2['smooth']:.6f},{float(cand2.get('yToXRatio', 1.0)):.6f},,0,0,0,ai_note,0.0\n"
+            )
 
         if stop and conf >= float(sess["confidence_threshold"]) and int(sess["iter"]) >= 3:
             best = sess.get("best")
@@ -3239,7 +3247,7 @@ class App(tk.Tk):
                 f.write(
                     f"confirm,{int(sess.get('iter',0))},{sc:.6f},0.000,{json.dumps('confirm')},{side},"
                     f"0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,{float(sess['fixed_dpi']):.3f},"
-                    f"{float(cand_full.get('syncSpeed', 0.0)):.6f},{float(cand_full.get('motivity', 0.0)):.6f},{float(cand_full.get('gamma', 0.0)):.6f},{float(cand_full.get('smooth', 0.0)):.6f},{float(cand_full.get('yToXRatio', 1.0)):.6f},\n"
+                    f"{float(cand_full.get('syncSpeed', 0.0)):.6f},{float(cand_full.get('motivity', 0.0)):.6f},{float(cand_full.get('gamma', 0.0)):.6f},{float(cand_full.get('smooth', 0.0)):.6f},{float(cand_full.get('yToXRatio', 1.0)):.6f},,0,0,{sc:.6f},confirm,0.0\n"
                 )
 
         pairs = conf.get("pairs")

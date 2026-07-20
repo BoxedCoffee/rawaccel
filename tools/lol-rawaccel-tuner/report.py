@@ -81,12 +81,13 @@ def write_report(csv_path, out_path=None, title="Run report"):
         tag = (r.get("tag") or "").strip()
         if tag in ("single", "combined"):
             score = _safe_float(r.get("score"), None)
+            metric_score = _safe_float(r.get("metric_score"), None)
             idx = _safe_float(r.get("idx"), None)
             if idx is None:
                 idx = _safe_float(r.get("iter"), None)
             if score is None or idx is None or not math.isfinite(score):
                 continue
-            combined.append((int(idx), float(score), r))
+            combined.append((int(idx), float(metric_score) if metric_score is not None else float(score), float(score), r))
 
     combined.sort(key=lambda x: x[0])
 
@@ -154,20 +155,25 @@ def write_report(csv_path, out_path=None, title="Run report"):
                 "</div>"
             )
 
-    best = max(combined, key=lambda x: x[1])[2] if combined else None
+    best = max(combined, key=lambda x: x[1])[3] if combined else None
     top = sorted(combined, key=lambda x: x[1], reverse=True)[:10]
 
-    chart = _svg_line([(i, s) for i, s, _ in combined], 900, 260)
+    chart = _svg_line([(i, metric_s) for i, metric_s, _, _ in combined], 900, 260)
 
     def td(s):
         return f"<td>{html.escape(str(s))}</td>"
 
     table_rows = []
-    for _, s, r in top:
+    for _, metric_s, raw_s, r in top:
+        score_mean = _safe_float(r.get("score_mean"), None)
+        score_std = _safe_float(r.get("score_std"), None)
         table_rows.append(
             "<tr>"
             + td(r.get("idx") or r.get("iter"))
-            + td(f"{s:.4f}")
+            + td(f"{metric_s:.4f}")
+            + td(f"{raw_s:.4f}")
+            + td(f"{score_mean:.4f}" if score_mean is not None else "")
+            + td(f"{score_std:.4f}" if score_std is not None else "")
             + td(r.get("outputDpi"))
             + td(r.get("syncSpeed"))
             + td(r.get("motivity"))
@@ -253,8 +259,28 @@ def write_report(csv_path, out_path=None, title="Run report"):
                 if blocks:
                     drill_blocks = "<div style='display:flex;gap:16px;flex-wrap:wrap'>" + "".join(blocks) + "</div>"
 
+        raw_s = _safe_float(best.get("score"), None)
+        metric_s = _safe_float(best.get("metric_score"), None)
+        score_mean = _safe_float(best.get("score_mean"), None)
+        score_std = _safe_float(best.get("score_std"), None)
+        sel = (best.get("selection_metric") or "").strip()
+        k = _safe_float(best.get("stability_k"), None)
+
+        score_bits = []
+        if metric_s is not None:
+            score_bits.append(f"metric={metric_s:.4f}")
+        if raw_s is not None:
+            score_bits.append(f"raw={raw_s:.4f}")
+        if score_mean is not None and score_std is not None:
+            score_bits.append(f"mean±std={score_mean:.4f}±{score_std:.4f}")
+        if sel:
+            if k is not None:
+                score_bits.append(f"sel={sel} (k={k:.2f})")
+            else:
+                score_bits.append(f"sel={sel}")
+
         summary = (
-            f"<p><b>Best</b> score={html.escape(best.get('score',''))} "
+            f"<p><b>Best</b> {html.escape(' | '.join(score_bits))} "
             f"DPI={html.escape(best.get('outputDpi',''))} syncSpeed={html.escape(best.get('syncSpeed',''))} "
             f"motivity={html.escape(best.get('motivity',''))} gamma={html.escape(best.get('gamma',''))} smooth={html.escape(best.get('smooth',''))} yToXRatio={html.escape(best.get('yToXRatio',''))}</p>"
             + drill_blocks
@@ -285,7 +311,7 @@ h3 {{ margin: 0 0 10px 0; font-size: 15px; color: #e5e7eb; }}
   <div class='card'>
   <h2>Top candidates</h2>
 <table>
-<thead><tr><th>idx</th><th>score</th><th>outputDpi</th><th>syncSpeed</th><th>motivity</th><th>gamma</th><th>smooth</th><th>yToXRatio</th></tr></thead>
+ <thead><tr><th>idx</th><th>metric</th><th>raw</th><th>mean</th><th>std</th><th>outputDpi</th><th>syncSpeed</th><th>motivity</th><th>gamma</th><th>smooth</th><th>yToXRatio</th></tr></thead>
 <tbody>
 {''.join(table_rows)}
 </tbody>
