@@ -122,6 +122,7 @@ def build_ai_messages(state):
         "mode": state.get("mode"),
         "bounds": state.get("bounds"),
         "fixed": state.get("fixed"),
+        "diagnosis": state.get("diagnosis"),
         "history": state.get("history"),
         "best": state.get("best"),
         "objective": state.get("objective"),

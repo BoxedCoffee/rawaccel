@@ -240,6 +240,9 @@ def run_task_block(root, trials, distances_px, radii_px, seed=None, timeout_ms=N
         dir_summary = None
         if bins > 0 and attempts:
             bin_w = 360.0 / float(bins)
+            speeds_all = sorted(float(a.get("speed_px_s", 0.0)) for a in attempts)
+            speed_p33 = float(pct(speeds_all, 1.0 / 3.0)) if speeds_all else 0.0
+            speed_p66 = float(pct(speeds_all, 2.0 / 3.0)) if speeds_all else 0.0
             rows = []
             for i in range(bins):
                 group = [a for a in attempts if int(a.get("dir_bin", -1)) == i]
@@ -287,13 +290,20 @@ def run_task_block(root, trials, distances_px, radii_px, seed=None, timeout_ms=N
                     }
                 )
 
-            dir_bins_obj = {"bins": int(bins), "rows": rows}
+            dir_bins_obj = {
+                "bins": int(bins),
+                "rows": rows,
+                "speed_p33": float(speed_p33),
+                "speed_p66": float(speed_p66),
+            }
 
             rows2 = [r for r in rows if int(r.get("n", 0)) > 0]
             worst_miss = sorted(rows2, key=lambda r: (float(r.get("miss_rate", 0.0)), float(r.get("p90_error_px", 0.0))), reverse=True)[:4]
             worst_p90 = sorted(rows2, key=lambda r: (float(r.get("p90_error_px", 0.0)), float(r.get("miss_rate", 0.0))), reverse=True)[:4]
             dir_summary = {
                 "bins": int(bins),
+                "speed_p33": float(speed_p33),
+                "speed_p66": float(speed_p66),
                 "worst_miss": worst_miss,
                 "worst_p90": worst_p90,
             }

@@ -3135,6 +3135,100 @@ class App(tk.Tk):
                 no_improve = int(sess.get("no_improve", 0))
                 best_score = float(sess.get("best_score", float("-inf")))
 
+                def _diag_from_dir_summary(ds, label):
+                    if not isinstance(ds, dict):
+                        return None
+                    worst = []
+                    for k in ("worst_miss", "worst_p90"):
+                        xs = ds.get(k)
+                        if not isinstance(xs, list):
+                            continue
+                        for r in xs:
+                            if not isinstance(r, dict):
+                                continue
+                            worst.append(r)
+                    if not worst:
+                        return None
+
+                    def center_deg(r):
+                        try:
+                            return 0.5 * (float(r.get("deg0", 0.0)) + float(r.get("deg1", 0.0)))
+                        except Exception:
+                            return 0.0
+
+                    uniq = {}
+                    for r in worst:
+                        try:
+                            b = int(r.get("bin"))
+                        except Exception:
+                            continue
+                        if b not in uniq:
+                            uniq[b] = r
+                    items = list(uniq.values())
+                    items.sort(key=lambda r: (float(r.get("miss_rate", 0.0)), float(r.get("p90_error_px", 0.0))), reverse=True)
+                    items = items[:6]
+
+                    sp33 = float(ds.get("speed_p33", 0.0) or 0.0)
+                    sp66 = float(ds.get("speed_p66", 0.0) or 0.0)
+
+                    recs = []
+                    vert_votes = 0
+                    vert_bias = 0.0
+                    overshoot_votes = 0
+                    undershoot_votes = 0
+                    high_speed_votes = 0
+                    low_speed_votes = 0
+                    for r in items:
+                        deg = center_deg(r)
+                        rad = math.radians(float(deg))
+                        vx = abs(math.cos(rad))
+                        vy = abs(math.sin(rad))
+                        bpar = float(r.get("bias_parallel_mean", 0.0) or 0.0)
+                        spd = float(r.get("speed_mean", 0.0) or 0.0)
+                        if vy >= 0.85:
+                            vert_votes += 1
+                            vert_bias += bpar
+                        if bpar >= 2.0:
+                            overshoot_votes += 1
+                        if bpar <= -2.0:
+                            undershoot_votes += 1
+                        if spd >= sp66 and sp66 > 0:
+                            high_speed_votes += 1
+                        if spd <= sp33 and sp33 > 0:
+                            low_speed_votes += 1
+
+                    if vert_votes >= 2:
+                        if vert_bias > 2.0:
+                            recs.append({"action": "yToXRatio", "direction": "decrease", "reason": "vertical-ish bins overshoot (b_parallel>0)"})
+                        if vert_bias < -2.0:
+                            recs.append({"action": "yToXRatio", "direction": "increase", "reason": "vertical-ish bins undershoot (b_parallel<0)"})
+
+                    if high_speed_votes >= 2 and overshoot_votes >= 2:
+                        recs.append({"action": "curve_aggression", "direction": "decrease", "reason": "high-speed bins overshoot"})
+                    if low_speed_votes >= 2 and undershoot_votes >= 2:
+                        recs.append({"action": "low_speed_gain", "direction": "increase", "reason": "low-speed bins undershoot"})
+
+                    return {
+                        "label": str(label),
+                        "speed_p33": sp33,
+                        "speed_p66": sp66,
+                        "worst_bins": [
+                            {
+                                "bin": int(r.get("bin", 0)),
+                                "deg0": float(r.get("deg0", 0.0) or 0.0),
+                                "deg1": float(r.get("deg1", 0.0) or 0.0),
+                                "n": int(r.get("n", 0) or 0),
+                                "miss_rate": float(r.get("miss_rate", 0.0) or 0.0),
+                                "p90_error_px": float(r.get("p90_error_px", 0.0) or 0.0),
+                                "bias_parallel_mean": float(r.get("bias_parallel_mean", 0.0) or 0.0),
+                                "bias_perp_mean": float(r.get("bias_perp_mean", 0.0) or 0.0),
+                                "speed_mean": float(r.get("speed_mean", 0.0) or 0.0),
+                            }
+                            for r in items
+                        ],
+                        "recommendations": recs,
+                    }
+
                 trend = {
                     "stage": stage,
                     "iter": int(it),
@@ -3149,10 +3243,24 @@ class App(tk.Tk):
                     "top": top,
                     "recent": recent,
                 }
+
+                last_diag = None
+                if recent:
+                    last_sum = recent[-1].get("summary") if isinstance(recent[-1], dict) else None
+                    if isinstance(last_sum, dict):
+                        if isinstance(last_sum.get("single"), dict):
+                            last_diag = {"single": _diag_from_dir_summary(last_sum.get("single", {}).get("dir_summary"), "single")}
+                        else:
+                            last_diag = {
+                                "micro": _diag_from_dir_summary(last_sum.get("micro", {}).get("dir_summary"), "micro"),
+                                "flick": _diag_from_dir_summary(last_sum.get("flick", {}).get("dir_summary"), "flick"),
+                            }
+
                 state = {
                     "mode": "synchronous",
                     "bounds": bounds,
                     "fixed": {"outputDpi": float(sess["fixed_dpi"])},
+                    "diagnosis": last_diag,
                     "history": _recent(hist, int(sess.get("history_limit", 12))),
                     "trend": trend,
                     "best": {
