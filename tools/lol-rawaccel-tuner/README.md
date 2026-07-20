@@ -55,6 +55,15 @@ After an AI run, use `Confirm best vs #2` to run an extra A/B validation block a
 - By default, blocks use `angle_sampling=stratified` (each bin gets similar samples) to reduce noise.
 - Use `Use worst bins` + `Run focus drill` to re-test only your weakest directions.
 
+## Fix weak bins
+`Fix weak bins` runs a paired before/after test on your selected bins:
+
+1. Baseline focus rounds
+2. Proposes a small tweak (AI if configured, otherwise heuristic)
+3. Re-tests the same bins with the same seeds
+
+It then reports a winner and shows baseline vs tweak directional tables.
+
 ## Notes
 - The app writes candidate settings to `./runs/<timestamp>/candidate.json` and calls `writer.exe` to apply.
 - Use the app’s Restore button to re-apply your original settings.

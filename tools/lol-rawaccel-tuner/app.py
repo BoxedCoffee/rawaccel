@@ -208,6 +208,8 @@ def _default_config():
         "confirm_rounds": 10,
         "focus_bins": "",
         "focus_rounds": 3,
+        "fix_rounds": 4,
+        "fix_mode": "Axis",
     }
 
 
@@ -285,6 +287,8 @@ class App(tk.Tk):
         self.confirm_rounds_var = tk.IntVar(value=int(self.cfg.get("confirm_rounds", 10)))
         self.focus_bins_var = tk.StringVar(value=str(self.cfg.get("focus_bins", "")))
         self.focus_rounds_var = tk.IntVar(value=int(self.cfg.get("focus_rounds", 3)))
+        self.fix_rounds_var = tk.IntVar(value=int(self.cfg.get("fix_rounds", 4)))
+        self.fix_mode_var = tk.StringVar(value=str(self.cfg.get("fix_mode", "Axis")))
 
         self.status_var = tk.StringVar(value="Idle")
         self.best_var = tk.StringVar(value="")
@@ -404,6 +408,12 @@ class App(tk.Tk):
         tk.Button(frm_actions, text="Use worst bins", command=self._focus_use_worst_bins).grid(row=2, column=4, sticky="w", **pad)
         tk.Button(frm_actions, text="Run focus drill", command=self._start_focus_drill).grid(row=2, column=5, sticky="w", **pad)
 
+        tk.Label(frm_actions, text="Fix rounds").grid(row=3, column=0, sticky="w", **pad)
+        tk.Entry(frm_actions, width=6, textvariable=self.fix_rounds_var).grid(row=3, column=1, sticky="w", **pad)
+        tk.Label(frm_actions, text="Fix mode").grid(row=3, column=2, sticky="w", **pad)
+        tk.OptionMenu(frm_actions, self.fix_mode_var, "Axis", "Curve").grid(row=3, column=3, sticky="w", **pad)
+        tk.Button(frm_actions, text="Fix weak bins", command=self._start_fix_weak_bins).grid(row=3, column=4, sticky="w", **pad)
+
         frm_status = tk.LabelFrame(self, text="Status")
         frm_status.grid(row=6, column=0, sticky="ew", **pad)
 
@@ -477,6 +487,8 @@ class App(tk.Tk):
         self.cfg["confirm_rounds"] = int(self.confirm_rounds_var.get())
         self.cfg["focus_bins"] = str(self.focus_bins_var.get())
         self.cfg["focus_rounds"] = int(self.focus_rounds_var.get())
+        self.cfg["fix_rounds"] = int(self.fix_rounds_var.get())
+        self.cfg["fix_mode"] = str(self.fix_mode_var.get())
         self.cfg["search"]["bounds"] = {
             "syncSpeed": [float(self.sync_min.get()), float(self.sync_max.get())],
             "motivity": [float(self.mot_min.get()), float(self.mot_max.get())],
@@ -1770,6 +1782,397 @@ class App(tk.Tk):
         self.progress_var.set(f"0/{int(rounds * runs_per_eval)}")
         self.status_var.set(f"Focus: starting ({rounds} rounds; bins {','.join(str(b) for b in bins)})")
         self.after(50, self._focus_step)
+
+    def _start_fix_weak_bins(self):
+        if self._session is not None:
+            messagebox.showinfo("Running", "A session is already running")
+            return
+        if not self._validate_ready():
+            return
+
+        if not str(self.focus_bins_var.get() or "").strip():
+            self._focus_use_worst_bins()
+
+        bins = self._parse_bins(self.focus_bins_var.get())
+        if not bins:
+            messagebox.showerror("Missing", "Set Focus bins first (or use worst bins)")
+            return
+
+        rounds = int(self.fix_rounds_var.get())
+        if rounds < 1:
+            messagebox.showerror("Invalid", "Fix rounds must be >= 1")
+            return
+
+        self._persist_ui_to_config()
+
+        bounds = self._bounds_with_axis()
+        base_cand = self._current_candidate(bounds)
+        fixed_dpi = self._read_current_output_dpi(self.settings_var.get().strip())
+        if fixed_dpi is None:
+            fixed_dpi = 0.0
+        full_base = {"mode": "synchronous", "outputDpi": float(fixed_dpi), **dict(base_cand)}
+
+        RUNS_DIR.mkdir(parents=True, exist_ok=True)
+        run_id = time.strftime("%Y%m%d-%H%M%S")
+        run_dir = RUNS_DIR / f"fix_{run_id}"
+        run_dir.mkdir(parents=True, exist_ok=True)
+
+        controller = RawAccelController(
+            self.writer_var.get().strip(),
+            self.settings_var.get().strip(),
+            profile_index=int(self.cfg.get("profile_index", 0)),
+        )
+        try:
+            controller.snapshot_base(run_dir / "base_settings.json")
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
+            return
+
+        log_path = run_dir / "results.csv"
+        log_path.write_text(
+            "phase,iter,score,confidence,reason,tag,throughput,miss_rate,p90_error,pathEff,perpDev,overshoots,reaccels,timeToMoveMs,correctionMs,biasX,biasY,h_miss_rate,v_miss_rate,h_p90_error,v_p90_error,outputDpi,syncSpeed,motivity,gamma,smooth,yToXRatio,weakness_path,score_mean,score_std,metric_score,selection_metric,stability_k\n",
+            encoding="utf-8",
+        )
+
+        dual_cfg = self.cfg.get("dual_drills")
+        dual_enabled = isinstance(dual_cfg, dict) and bool(dual_cfg.get("enabled"))
+        runs_per_eval = 2 if dual_enabled else 1
+        total_runs = int(rounds * runs_per_eval * 2)
+
+        base_path = run_dir / "fix_baseline.json"
+        controller.write_candidate_settings(full_base, base_path)
+        controller.apply_settings(base_path)
+
+        self._stop_requested = False
+        self._session = {
+            "type": "fix",
+            "controller": controller,
+            "run_dir": run_dir,
+            "log_path": log_path,
+            "bounds": bounds,
+            "bins": list(bins),
+            "rounds": int(rounds),
+            "seed_base": int(self.seed_var.get()) + 161000,
+            "stage": "baseline",
+            "round": 0,
+            "baseline": dict(full_base),
+            "tweak": None,
+            "baseline_scores": [],
+            "tweak_scores": [],
+            "baseline_weak": [],
+            "tweak_weak": [],
+            "current_run": 0,
+            "total_runs": total_runs,
+        }
+
+        self.progress_var.set(f"0/{total_runs}")
+        self.status_var.set(f"Fix: baseline ({rounds} rounds)")
+        self.after(50, self._fix_step)
+
+    def _fix_step(self):
+        sess = self._session
+        if not isinstance(sess, dict) or sess.get("type") != "fix":
+            return
+        if self._stop_requested:
+            self._finish("Stopped")
+            return
+
+        stage = str(sess.get("stage", "baseline"))
+        r = int(sess.get("round", 0))
+        rounds = int(sess.get("rounds", 0))
+        if r >= rounds:
+            if stage == "baseline":
+                bounds = sess.get("bounds") if isinstance(sess.get("bounds"), dict) else self._bounds_with_axis()
+                base = sess.get("baseline") if isinstance(sess.get("baseline"), dict) else {}
+                base2 = {k: base.get(k) for k in ("syncSpeed", "motivity", "gamma", "smooth", "yToXRatio") if k in base}
+                base2 = ai_tuner.clamp_candidate(base2, bounds)
+
+                client = self._build_ai_client()
+                mode = str(self.fix_mode_var.get() or "Axis")
+                tweak = None
+                last_weak = sess.get("baseline_weak")[-1] if isinstance(sess.get("baseline_weak"), list) and sess.get("baseline_weak") else None
+                if client is not None and isinstance(last_weak, dict):
+                    try:
+                        notes = "Propose a small adjustment targeting the diagnosis."
+                        if mode == "Axis":
+                            notes = notes + " ONLY change yToXRatio; keep syncSpeed/motivity/gamma/smooth the same."
+                        state = {
+                            "mode": "synchronous",
+                            "bounds": bounds,
+                            "fixed": {"outputDpi": float(base.get("outputDpi", 0.0))},
+                            "diagnosis": {"focus": last_weak.get("dir_summary")},
+                            "history": [],
+                            "best": {"score": 0.0, "candidate": dict(base2)},
+                            "objective": {"goal": "maximize focus combined_score", "notes": notes},
+                            "limits": {"selection_metric": "median"},
+                        }
+                        msgs = ai_tuner.build_ai_messages(state)
+                        content = client.chat(msgs, temperature=0.2)
+                        parsed = ai_tuner.parse_ai_response(content)
+                        tweak = ai_tuner.clamp_candidate(parsed.get("candidate", {}), bounds)
+                        if mode == "Axis":
+                            for k in ("syncSpeed", "motivity", "gamma", "smooth"):
+                                if k in base2:
+                                    tweak[k] = float(base2[k])
+                    except Exception:
+                        tweak = None
+
+                if tweak is None:
+                    tweak = self._propose_fix_candidate(base2, bounds, last_weak or {}, mode)
+
+                full_tweak = {"mode": "synchronous", "outputDpi": float(base.get("outputDpi", 0.0)), **dict(tweak)}
+                sess["tweak"] = dict(full_tweak)
+
+                tweak_path = pathlib.Path(sess["run_dir"]) / "fix_tweak.json"
+                sess["controller"].write_candidate_settings(full_tweak, tweak_path)
+                sess["controller"].apply_settings(tweak_path)
+
+                sess["stage"] = "tweak"
+                sess["round"] = 0
+                self.status_var.set(f"Fix: tweak ({rounds} rounds)")
+                self.after(50, self._fix_step)
+                return
+
+            baseline_scores = [float(x) for x in (sess.get("baseline_scores") or [])]
+            tweak_scores = [float(x) for x in (sess.get("tweak_scores") or [])]
+            n = min(len(baseline_scores), len(tweak_scores))
+            baseline_scores = baseline_scores[:n]
+            tweak_scores = tweak_scores[:n]
+            if n:
+                diffs = [t - b for t, b in zip(tweak_scores, baseline_scores)]
+                wins = sum(1 for d in diffs if d >= 0)
+                win_rate = wins / float(len(diffs))
+                b_mean = float(statistics.mean(baseline_scores))
+                t_mean = float(statistics.mean(tweak_scores))
+                d_mean = float(t_mean - b_mean)
+                d_std = float(statistics.pstdev(diffs)) if len(diffs) >= 2 else 0.0
+                margin = max(0.5 * d_std, 0.01 * abs(b_mean))
+
+                winner = "Too close"
+                if d_mean >= margin and win_rate >= 0.6:
+                    winner = "Tweak"
+                if (-d_mean) >= margin and (1.0 - win_rate) >= 0.6:
+                    winner = "Baseline"
+
+                msg = (
+                    f"Winner: {winner}\n\n"
+                    f"Rounds: {n}\n"
+                    f"Win rate (tweak): {win_rate*100:.0f}%\n"
+                    f"Baseline mean: {b_mean:.4f}\n"
+                    f"Tweak mean: {t_mean:.4f}\n"
+                    f"Diff (tweak-baseline): {d_mean:+.4f} (margin {margin:.4f})"
+                )
+                messagebox.showinfo("Fix weak bins", msg)
+
+                if winner == "Tweak" and isinstance(sess.get("tweak"), dict):
+                    self._last_best = dict(sess["tweak"])
+                elif isinstance(sess.get("baseline"), dict):
+                    self._last_best = dict(sess["baseline"])
+
+            self._finish("Done")
+            return
+
+        bins = sess.get("bins")
+        if not isinstance(bins, list) or not bins:
+            self._finish("Done")
+            return
+
+        seed = int(sess.get("seed_base", 0)) + r * 100
+        label = "baseline" if stage == "baseline" else "tweak"
+        self.status_var.set(f"Fix: {label} {r+1}/{rounds}")
+
+        ev = self._eval_drills(seed, progress_hook=self._progress_hook, angle_filter_bins=bins, angle_sampling="stratified")
+        if ev is None:
+            self._stop_requested = True
+            self._finish("Stopped")
+            return
+
+        weakness_path = f"weakness_fix_{label}_{r+1:02d}.json"
+        weak_obj = {"stage": str(label), "round": int(r + 1), "dir_bins": None, "dir_summary": None}
+        if "single" in ev and isinstance(ev.get("single"), dict):
+            weak_obj["dir_bins"] = ev["single"].get("dir_bins")
+            weak_obj["dir_summary"] = ev["single"].get("dir_summary")
+        else:
+            weak_obj["dir_bins"] = {
+                "micro": ev.get("micro", {}).get("dir_bins") if isinstance(ev.get("micro"), dict) else None,
+                "flick": ev.get("flick", {}).get("dir_bins") if isinstance(ev.get("flick"), dict) else None,
+            }
+            weak_obj["dir_summary"] = {
+                "micro": ev.get("micro", {}).get("dir_summary") if isinstance(ev.get("micro"), dict) else None,
+                "flick": ev.get("flick", {}).get("dir_summary") if isinstance(ev.get("flick"), dict) else None,
+            }
+
+        try:
+            (pathlib.Path(sess["run_dir"]) / weakness_path).write_text(json.dumps(weak_obj, ensure_ascii=False), encoding="utf-8")
+        except Exception:
+            weakness_path = ""
+
+        score = float(ev.get("combined_score", float("-inf")))
+        if stage == "baseline":
+            sess.setdefault("baseline_scores", []).append(score)
+            sess.setdefault("baseline_weak", []).append(weak_obj)
+        else:
+            sess.setdefault("tweak_scores", []).append(score)
+            sess.setdefault("tweak_weak", []).append(weak_obj)
+
+        cand = sess.get("baseline") if stage == "baseline" else sess.get("tweak")
+        if not isinstance(cand, dict):
+            cand = {}
+
+        with open(sess["log_path"], "a", encoding="utf-8") as f:
+            f.write(
+                f"fix_{label},{r},{float(score):.6f},0.000,{json.dumps('fix')},combined,"
+                f"0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,"
+                f"{float(cand.get('outputDpi', 0.0)):.3f},{float(cand.get('syncSpeed', 0.0)):.6f},{float(cand.get('motivity', 0.0)):.6f},{float(cand.get('gamma', 0.0)):.6f},{float(cand.get('smooth', 0.0)):.6f},{float(cand.get('yToXRatio', 1.0)):.6f},{weakness_path},0,0,{float(score):.6f},fix,0.0\n"
+            )
+
+        sess["round"] = r + 1
+        self.after(50, self._fix_step)
+
+    def _parse_bins(self, raw):
+        raw = str(raw or "").strip()
+        if not raw:
+            return []
+        bins = []
+        for part in raw.replace(" ", "").split(","):
+            if not part:
+                continue
+            try:
+                bins.append(int(part))
+            except Exception:
+                pass
+        return sorted(set(bins))
+
+    def _bounds_with_axis(self):
+        bounds = dict(self.cfg.get("search", {}).get("bounds", {}))
+        axis_bounds = self.cfg.get("axis", {}).get("bounds", {})
+        if isinstance(axis_bounds, dict) and "yToXRatio" in axis_bounds:
+            bounds["yToXRatio"] = list(axis_bounds["yToXRatio"])
+        return bounds
+
+    def _current_candidate(self, bounds):
+        curve = self._read_current_curve(self.settings_var.get().strip())
+        if curve is None:
+            curve = {k: (float(v[0]) + float(v[1])) / 2.0 for k, v in bounds.items() if isinstance(v, (list, tuple)) and len(v) == 2}
+        yxr = self._read_current_y_to_x_ratio(self.settings_var.get().strip())
+        if yxr is None:
+            yxr = 1.0
+        curve = dict(curve)
+        curve["yToXRatio"] = float(yxr)
+        return ai_tuner.clamp_candidate(curve, bounds)
+
+    def _diag_votes(self, weakness_obj):
+        if not isinstance(weakness_obj, dict):
+            return {}
+        ds = weakness_obj.get("dir_summary") if isinstance(weakness_obj.get("dir_summary"), dict) else None
+        if not isinstance(ds, dict):
+            return {}
+
+        items = []
+        for k in ("worst_miss", "worst_p90"):
+            xs = ds.get(k)
+            if not isinstance(xs, list):
+                continue
+            for r in xs:
+                if isinstance(r, dict):
+                    items.append(r)
+        if not items:
+            return {}
+
+        uniq = {}
+        for r in items:
+            try:
+                b = int(r.get("bin"))
+            except Exception:
+                continue
+            if b not in uniq:
+                uniq[b] = r
+        items = list(uniq.values())
+        items.sort(key=lambda r: (float(r.get("miss_rate", 0.0)), float(r.get("p90_error_px", 0.0))), reverse=True)
+        items = items[:6]
+
+        sp33 = float(ds.get("speed_p33", 0.0) or 0.0)
+        sp66 = float(ds.get("speed_p66", 0.0) or 0.0)
+
+        vert_votes = 0
+        vert_bias = 0.0
+        overshoot_votes = 0
+        undershoot_votes = 0
+        high_over = 0
+        low_under = 0
+
+        for r in items:
+            deg = 0.5 * (float(r.get("deg0", 0.0) or 0.0) + float(r.get("deg1", 0.0) or 0.0))
+            rad = math.radians(float(deg))
+            vy = abs(math.sin(rad))
+            bpar = float(r.get("bias_parallel_mean", 0.0) or 0.0)
+            spd = float(r.get("speed_mean", 0.0) or 0.0)
+
+            if vy >= 0.85:
+                vert_votes += 1
+                vert_bias += bpar
+            if bpar >= 2.0:
+                overshoot_votes += 1
+            if bpar <= -2.0:
+                undershoot_votes += 1
+            if sp66 > 0 and spd >= sp66 and bpar >= 2.0:
+                high_over += 1
+            if sp33 > 0 and spd <= sp33 and bpar <= -2.0:
+                low_under += 1
+
+        return {
+            "speed_p33": sp33,
+            "speed_p66": sp66,
+            "vert_votes": int(vert_votes),
+            "vert_bias": float(vert_bias),
+            "overshoot_votes": int(overshoot_votes),
+            "undershoot_votes": int(undershoot_votes),
+            "high_over": int(high_over),
+            "low_under": int(low_under),
+        }
+
+    def _propose_fix_candidate(self, base, bounds, weakness_obj, mode):
+        base = dict(base)
+        mode = str(mode or "Axis").strip()
+        votes = self._diag_votes(weakness_obj)
+
+        if mode == "Axis":
+            if "yToXRatio" not in bounds:
+                return base
+            yxr = float(base.get("yToXRatio", 1.0))
+            d = 0.0
+            if int(votes.get("vert_votes", 0)) >= 2:
+                vb = float(votes.get("vert_bias", 0.0))
+                if vb > 2.0:
+                    d = -0.02
+                if vb < -2.0:
+                    d = 0.02
+            if d == 0.0:
+                if int(votes.get("high_over", 0)) >= 2:
+                    d = -0.01
+                elif int(votes.get("low_under", 0)) >= 2:
+                    d = 0.01
+
+            base["yToXRatio"] = float(yxr + d)
+            for k in ("syncSpeed", "motivity", "gamma", "smooth"):
+                if k in base:
+                    base[k] = float(base[k])
+            return ai_tuner.clamp_candidate(base, bounds)
+
+        if int(votes.get("high_over", 0)) >= 2:
+            if "motivity" in base:
+                base["motivity"] = float(base["motivity"]) * 0.96
+            if "gamma" in base:
+                base["gamma"] = float(base["gamma"]) * 0.96
+            if "smooth" in base:
+                base["smooth"] = float(base["smooth"]) + 0.05
+        elif int(votes.get("low_under", 0)) >= 2:
+            if "syncSpeed" in base:
+                base["syncSpeed"] = float(base["syncSpeed"]) * 1.08
+            if "smooth" in base:
+                base["smooth"] = float(base["smooth"]) + 0.03
+
+        return ai_tuner.clamp_candidate(base, bounds)
 
     def _focus_step(self):
         sess = self._session

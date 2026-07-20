@@ -155,6 +155,183 @@ def write_report(csv_path, out_path=None, title="Run report"):
                 "</div>"
             )
 
+    fix_segments = []
+    cur = []
+    for r in rows:
+        phase = (r.get("phase") or "").strip()
+        tag = (r.get("tag") or "").strip()
+        if phase in ("fix_baseline", "fix_tweak") and tag == "combined":
+            cur.append(r)
+        else:
+            if cur:
+                fix_segments.append(cur)
+                cur = []
+    if cur:
+        fix_segments.append(cur)
+
+    fix_html = ""
+    if fix_segments:
+        seg = fix_segments[-1]
+        base = []
+        tweak = []
+        for r in seg:
+            phase = (r.get("phase") or "").strip()
+            sc = _safe_float(r.get("score"), None)
+            if sc is None or not math.isfinite(float(sc)):
+                continue
+            wp = (r.get("weakness_path") or "").strip()
+            item = {"score": float(sc), "weakness_path": wp}
+            if phase == "fix_baseline":
+                base.append(item)
+            else:
+                tweak.append(item)
+
+        n = min(len(base), len(tweak))
+        if n > 0:
+            base = base[:n]
+            tweak = tweak[:n]
+            b_scores = [x["score"] for x in base]
+            t_scores = [x["score"] for x in tweak]
+            diffs = [t - b for t, b in zip(t_scores, b_scores)]
+
+            wins = sum(1 for d in diffs if d >= 0.0)
+            win_rate = wins / float(len(diffs))
+
+            b_mean = sum(b_scores) / float(len(b_scores))
+            t_mean = sum(t_scores) / float(len(t_scores))
+            b_std = (sum((x - b_mean) ** 2 for x in b_scores) / float(len(b_scores))) ** 0.5 if len(b_scores) >= 2 else 0.0
+            t_std = (sum((x - t_mean) ** 2 for x in t_scores) / float(len(t_scores))) ** 0.5 if len(t_scores) >= 2 else 0.0
+            d_mean = t_mean - b_mean
+            d_std = (sum((x - d_mean) ** 2 for x in diffs) / float(len(diffs))) ** 0.5 if len(diffs) >= 2 else 0.0
+            margin = max(0.5 * d_std, 0.01 * abs(b_mean))
+
+            winner = "Too close"
+            if d_mean >= margin and win_rate >= 0.6:
+                winner = "Tweak"
+            if (-d_mean) >= margin and (1.0 - win_rate) >= 0.6:
+                winner = "Baseline"
+
+            def load_wp(wp):
+                if not wp:
+                    return None
+                try:
+                    return json.loads((csv_path.parent / wp).read_text(encoding="utf-8"))
+                except Exception:
+                    return None
+
+            def merge_dir_bins(db_list):
+                db_list = [db for db in db_list if isinstance(db, dict) and isinstance(db.get("rows"), list)]
+                if not db_list:
+                    return None
+                bins = int(db_list[0].get("bins", 0) or 0)
+                acc = {}
+                for db in db_list:
+                    for row in db.get("rows", []):
+                        if not isinstance(row, dict):
+                            continue
+                        try:
+                            bi = int(row.get("bin"))
+                        except Exception:
+                            continue
+                        n = int(row.get("n", 0) or 0)
+                        if n <= 0:
+                            continue
+                        if bi not in acc:
+                            acc[bi] = {
+                                "bin": bi,
+                                "deg0": float(row.get("deg0", 0.0) or 0.0),
+                                "deg1": float(row.get("deg1", 0.0) or 0.0),
+                                "n": 0,
+                                "miss_num": 0.0,
+                                "p90_num": 0.0,
+                                "bpar_num": 0.0,
+                                "bperp_num": 0.0,
+                                "corr_num": 0.0,
+                                "move_num": 0.0,
+                                "spd_num": 0.0,
+                            }
+                        a = acc[bi]
+                        a["n"] += n
+                        a["miss_num"] += float(row.get("miss_rate", 0.0) or 0.0) * n
+                        a["p90_num"] += float(row.get("p90_error_px", 0.0) or 0.0) * n
+                        a["bpar_num"] += float(row.get("bias_parallel_mean", 0.0) or 0.0) * n
+                        a["bperp_num"] += float(row.get("bias_perp_mean", 0.0) or 0.0) * n
+                        a["corr_num"] += float(row.get("avg_correction_ms", 0.0) or 0.0) * n
+                        a["move_num"] += float(row.get("avg_time_to_move_ms", 0.0) or 0.0) * n
+                        a["spd_num"] += float(row.get("speed_mean", 0.0) or 0.0) * n
+
+                rows_out = []
+                for bi in sorted(acc.keys()):
+                    a = acc[bi]
+                    n = max(1, int(a["n"]))
+                    rows_out.append(
+                        {
+                            "bin": int(bi),
+                            "deg0": float(a["deg0"]),
+                            "deg1": float(a["deg1"]),
+                            "n": int(a["n"]),
+                            "miss_rate": float(a["miss_num"] / n),
+                            "p90_error_px": float(a["p90_num"] / n),
+                            "bias_parallel_mean": float(a["bpar_num"] / n),
+                            "bias_perp_mean": float(a["bperp_num"] / n),
+                            "avg_correction_ms": float(a["corr_num"] / n),
+                            "avg_time_to_move_ms": float(a["move_num"] / n),
+                            "speed_mean": float(a["spd_num"] / n),
+                        }
+                    )
+                return {"bins": int(bins), "rows": rows_out}
+
+            def collect_side(objs, key):
+                out = []
+                for o in objs:
+                    if not isinstance(o, dict):
+                        continue
+                    db = o.get("dir_bins")
+                    if isinstance(db, dict) and key is None and isinstance(db.get("rows"), list):
+                        out.append(db)
+                    if isinstance(db, dict) and key is not None:
+                        sub = db.get(key)
+                        if isinstance(sub, dict) and isinstance(sub.get("rows"), list):
+                            out.append(sub)
+                return out
+
+            base_w = [load_wp(x.get("weakness_path")) for x in base]
+            tweak_w = [load_wp(x.get("weakness_path")) for x in tweak]
+
+            def render_pair(label, base_db, tweak_db):
+                if base_db is None and tweak_db is None:
+                    return ""
+                def wrap(db, title):
+                    if db is None:
+                        return ""
+                    return render_bins({"dir_bins": db}, title)
+                left = wrap(base_db, f"{label} baseline")
+                right = wrap(tweak_db, f"{label} tweak")
+                return "<div style='display:flex;gap:16px;flex-wrap:wrap'>" + left + right + "</div>"
+
+            base_single = merge_dir_bins(collect_side(base_w, None))
+            tweak_single = merge_dir_bins(collect_side(tweak_w, None))
+            base_micro = merge_dir_bins(collect_side(base_w, "micro"))
+            tweak_micro = merge_dir_bins(collect_side(tweak_w, "micro"))
+            base_flick = merge_dir_bins(collect_side(base_w, "flick"))
+            tweak_flick = merge_dir_bins(collect_side(tweak_w, "flick"))
+
+            tables = ""
+            if base_single is not None or tweak_single is not None:
+                tables = render_pair("Directional", base_single, tweak_single)
+            else:
+                tables = render_pair("Micro", base_micro, tweak_micro) + render_pair("Flick", base_flick, tweak_flick)
+
+            fix_html = (
+                "<div class='card'>"
+                "<h2>Fix weak bins</h2>"
+                f"<p><b>Winner</b>: {html.escape(winner)}</p>"
+                f"<p>Rounds={n} | Win rate (tweak)={win_rate*100:.0f}% | Mean diff (tweak-baseline)={d_mean:+.4f} (margin {margin:.4f})</p>"
+                f"<p>Baseline mean±std: {b_mean:.4f} ± {b_std:.4f} | Tweak mean±std: {t_mean:.4f} ± {t_std:.4f}</p>"
+                + tables
+                + "</div>"
+            )
+
     best = max(combined, key=lambda x: x[1])[3] if combined else None
     top = sorted(combined, key=lambda x: x[1], reverse=True)[:10]
 
@@ -401,6 +578,7 @@ h3 {{ margin: 0 0 10px 0; font-size: 15px; color: #e5e7eb; }}
   {chart}
   </div>
   {confirm_html}
+  {fix_html}
   <div class='card'>
   <h2>Top candidates</h2>
 <table>
